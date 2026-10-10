@@ -1,0 +1,18 @@
+/tests/**/renders/
+*-preview.png
+*.tmp
+*.log
+Thumbs.db
+.DS_Store
+
+# Local private data, credentials and verification output
+backup/
+backups/
+work/
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.pfx
+*private*.json
