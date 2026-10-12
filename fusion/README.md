@@ -3,7 +3,9 @@
 `TimetableBoard/TimetableBoard.py` dựng một tài liệu Fusion mới bằng sketch,
 extrude, cut, combine và rectangular pattern native. Script không nhập STL,
 mesh hay hình học đã tessellate. Mỗi lần bấm **Run** tạo tài liệu parametric
-mới; các biến nguồn và biến tính được xem trong **Change Parameters**.
+mới; các biến nguồn và biến tính được xem trong **Change Parameters**. Outline
+dùng cung tròn native theo bước sóng và được ràng buộc offset associative cho
+viền; đây là hình học editable có chủ ý thay cho việc tessellate sinusoid.
 
 ## Cách chạy
 
@@ -29,8 +31,8 @@ nhận cuối cùng là mở script trong Fusion và quan sát timeline/Change P
 | Lưới | `core_width_ref`, `max_board_width` | 240, 254 mm | Rộng lõi và giới hạn rộng ngoài |
 | Lưới | `card_width`, `row_pitch` | 11, 15 mm | Rộng thẻ và bước hàng |
 | Thân | `base_thickness` | 5.6 mm | Dày bảng; phải lớn hơn tổng độ sâu hốc |
-| Viền | `wave_amplitude`, `wave_pitch`, `wave_softness` | 1.5, 9.8, 6 | Mẫu viền scallop được lấy mẫu khi Run |
-| Hốc | `slot_depth`, `slot_tolerance` | 0.01, 0 mm | Pocket seed rồi pattern theo ngày/hàng |
+| Viền | `wave_amplitude`, `wave_pitch` | 1.5, 9.8 mm | Biên độ cập nhật theo expression; đổi số cung theo pitch cần Run lại |
+| Hốc | `slot_depth`, `slot_tolerance`, `slot_corner_radius` | 0.01, 0, 3.4 mm | Pocket seed bo góc native rồi pattern theo ngày/hàng |
 | Nam châm | `magnet_hole_d`, `magnet_hole_depth` | 6.1, 2.2 mm | Đường kính và độ sâu; không xuyên đáy |
 | Nam châm | `magnet_center_pitch`, `magnet_end_inset` | 12, 6.5 mm | Bước và khoảng hốc đầu; `magnet_count` tự tính |
 | Plaque | `subtitle_block_length`, `slogan_block_length` | 90, 190 mm | Chiều dài hai plaque tháo rời |
@@ -45,8 +47,10 @@ biến derived. Chúng dùng biểu thức Fusion thay vì tọa độ chỉ có
 
 - Bảng chính có outline ràng buộc đầy đủ, hai lỗ treo tùy chọn, pocket lịch và
   pattern hốc nam châm theo cột/hàng.
-- Viền scallop là hai loop sketch native có driving coordinate cho từng đỉnh;
-  viền được Join vào body bảng.
+- Viền scallop là loop cung tròn sketch native có tâm/bán kính driving; hai offset
+  độc lập từ cùng loop tạo thành ring associative rồi Join vào body bảng. Offset
+  cho phép topology thay đổi (`isTopologyMatched=False`) khi khoảng cách vượt bán
+  kính cục bộ, và profile annular được chọn bằng diện tích thực.
 - Tiêu đề, thứ trong tuần và nhãn Sáng/Chiều là `SketchText` riêng, extrude
   trực tiếp từ đối tượng text rồi Join vào bảng. Một underlay mỏng đỡ phần tiêu
   đề nhô khỏi mép bảng.
@@ -58,10 +62,16 @@ biến derived. Chúng dùng biểu thức Fusion thay vì tọa độ chỉ có
   vì Fusion không thể tạo thêm chuỗi SketchText từ một vòng lặp Python sau khi
   tài liệu đã chạy.
 
-Đơn giản hóa có chủ ý: biên scallop được lấy mẫu từ sinusoid thay vì giữ
-function curve, chữ dùng font Fusion `Oswald`, và text metrics không tự đo để
-đổi chiều dài plaque. Các lựa chọn này giữ sketch, text và feature có thể sửa
-được trong Fusion.
+Đơn giản hóa có chủ ý: biên scallop dùng cung tròn native thay vì giữ function
+curve sinusoid, chữ dùng font Fusion `Oswald`, và text metrics không tự đo để
+đổi chiều dài plaque. Các đoạn cung kề nhau giữ đúng bước và biên ngoài nhưng
+có thể tạo tiếp tuyến gãy nhẹ tại điểm nối; offset ring được kiểm tra như profile
+kín trong Fusion. Các lựa chọn này giữ sketch, text và feature có thể sửa được.
+
+Ở stage nhãn bảng, backing/title/weekday/Sáng/Chiều dùng `JoinFeatureOperation`
+trực tiếp khi bảng là solid duy nhất. Với mặc định 5 ngày, cách này loại bỏ 9
+lần Combine runtime theo call graph nguồn; đây chưa phải bằng chứng timeline
+Fusion đã chạy.
 
 ## Kiểm tra lỗi
 
@@ -73,8 +83,8 @@ phần đã kiểm tra offline và phần chỉ có thể xác nhận trong Fusi
 ## Giới hạn hình học và thay đổi tham số
 
 - Mẫu mặc định tạo **17 solid**: bảng (gồm viền và chữ), hai bảng tên và 14 thẻ môn. Các part tháo rời được đặt ngoài bảng để chọn/xuất riêng, không lắp sẵn vào hốc.
-- Thân và viền dùng cùng outline bo góc/sóng gồm các đoạn thẳng native có driving dimensions. `wave_amplitude`, `wave_softness`, kích thước bảng và bán kính góc cập nhật theo expression. `wave_pitch` quyết định số đỉnh lúc Run; đổi pitch cần **Run lại** để đổi topology.
-- Các hốc thẻ/bảng tên và thân part rời là hình chữ nhật góc vuông; không dựng bo góc rãnh `slot_corner_radius` của SCAD. Tham số này không được đưa vào User Parameters. Dung sai thẻ mở rộng đều về hai phía.
+- Thân và viền dùng cùng biên cung tròn native. Rectangle native giữ bốn driving dimensions của parent (x/y/width/height), sau đó thêm bốn fillet theo `slot_corner_radius`, vì vậy bbox ngoài không bị tăng khi đoạn thẳng bị trim. `wave_amplitude`, kích thước bảng và bán kính góc cập nhật theo expression. `wave_pitch` quyết định số cung lúc Run; đổi pitch cần **Run lại** để đổi topology.
+- Các hốc thẻ/bảng tên và thân part rời là rounded rectangle native. `slot_corner_radius` phải nhỏ hơn nửa kích thước cạnh ngắn của từng part; nếu đổi tham số trong Change Parameters cần kiểm tra lại feature health. Dung sai thẻ mở rộng đều về hai phía.
 - Tên thứ và các nhóm buổi/lỗ treo được tạo theo lựa chọn lúc Run. Đổi `day_count` vẫn cập nhật lưới, chiều dài thẻ, vị trí nhãn đã có và pattern; để thêm/bớt nhãn thứ phải sửa `DEFAULTS` rồi **Run lại**. Tương tự khi bật/tắt buổi hoặc lỗ treo. Số hàng dương của buổi đã có cập nhật bằng pattern; thêm một buổi vốn không có phải Run lại.
 - Tiêu đề dùng cỡ 14 mm (`title_size`) thay cỡ 18 mm của SCAD, có tấm đỡ chữ nhật; không tái tạo biên dạng theo silhouette chữ. Nhãn Sáng/Chiều nằm ngang bên trái thay chữ xoay dọc của SCAD. Font, xuống dòng, dấu tiếng Việt và độ rộng chữ cần kiểm tra trong Fusion; không tự tính lại chiều dài bảng tên theo text metrics.
 - Hai bảng tên có chiều dài mặc định 90/190 mm. Cả hốc trên bảng lẫn bảng tên rời có cùng công thức số lượng/tâm nam châm. Độ cao 6.5 mm của bảng tên và 5.2 mm của thẻ đã bao gồm chữ nổi.
@@ -88,7 +98,9 @@ python -m unittest discover -s tests -p test_fusion_timetable.py -v
 python -m py_compile fusion/TimetableBoard/TimetableBoard.py
 ```
 
-14 test đạt: layout mặc định/7 ngày/6–4 tiết, chain expression thực, một ngày và chiều dài thẻ thủ công, tọa độ outline đổi kích thước/độ mềm sóng, miền tham số, và mock luồng Cut/Pattern. Mock kiểm tra target luôn là body kết quả mới, dung sai cân tâm và tâm hốc nam châm bảng tên. Đây không phải kiểm chứng solver hay Boolean của Autodesk.
+21 test đạt: layout mặc định/7 ngày/6–4 tiết, chain expression thực, một ngày và chiều dài thẻ thủ công, kế hoạch cung native, parent rectangle trước fillet, offset ring độc lập, miền tham số, và mock luồng Cut/Pattern. Mock kiểm tra target luôn là body kết quả mới, dung sai cân tâm và tâm hốc nam châm bảng tên. Đây không phải kiểm chứng solver hay Boolean của Autodesk.
+
+`wave_softness` đã bỏ khỏi bộ tham số Fusion vì cung tròn native không cần độ mịn tessellation. Bản mặc định thay 688 đoạn outline bằng 84 cung; đây là số entity theo kế hoạch hình học Python, chưa phải đo từ document Fusion. Bán kính bo rectangle và biên độ sóng được kiểm tra trước khi dựng để tránh hình học suy biến.
 
 Khi Run, hộp tiến trình báo nhóm đang dựng; lỗi extrude có tên feature và lỗi tổng có stage/traceback. Document lỗi được giữ mở để xem timeline. `_check_model` yêu cầu 17 solid, sketch đủ ràng buộc, feature healthy và bounds bảng đúng; `VERIFY_VARIANTS` kiểm tra recompute rồi khôi phục tham số bằng `finally`. Chưa chạy các kiểm tra này trong Fusion ở đợt bổ sung; chưa có bằng chứng lắp/in thực.
 

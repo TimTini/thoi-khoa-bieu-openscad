@@ -99,6 +99,11 @@ class FusionScriptContractTest(unittest.TestCase):
                       "heightParameter", "isFullyConstrained",
                       "FeatureOperations.NewBodyFeatureOperation"):
             self.assertIn(token, source)
+        for token in ("createOffsetInput", "addOffset2", "sketchArcs",
+                      "addByCenterStartSweep", "addRadialDimension"):
+            self.assertIn(token, source)
+        self.assertNotIn("wave_outline_expressions", source)
+        self.assertNotIn("sketchPoints.add(core.Point3D.create", source)
         self.assertNotRegex(source, r"(mesh|stl|obj|importManager|TriangleMesh)",
                             msg="native script must not import mesh geometry")
 
@@ -120,20 +125,54 @@ class FusionScriptContractTest(unittest.TestCase):
 
 
 class NativeGeometryRegressionTest(unittest.TestCase):
-    def test_wave_outline_coordinates_follow_board_parameters(self):
+    def test_native_arc_parameters_reject_degenerate_geometry(self):
+        self.assertNotIn('wave_softness', timetable.DEFAULTS)
+        for changes in ({'wave_amplitude': 0}, {'slot_corner_radius': 6},
+                        {'corner_radius': 110}, {'border_width': 0}):
+            with self.assertRaises(ValueError):
+                timetable.validate(dict(timetable.DEFAULTS, **changes))
+
+    def test_analytic_outline_plan_has_native_arcs_and_safe_offset_radius(self):
         for changes in ({},{'day_count':7},{'morning_periods':6,'afternoon_periods':4}):
             p=dict(timetable.DEFAULTS,**changes)
-            values=timetable.derived_values(p)
-            expressions=timetable.wave_outline_expressions(p,'0 mm')
-            def calc(expr):
-                return eval(expr.replace(' mm',''),{'__builtins__':{}},values)
-            points=[(calc(x),calc(y)) for x,y in expressions]
-            self.assertAlmostEqual(min(x for x,y in points),0,places=6)
-            self.assertAlmostEqual(max(x for x,y in points),values['overall_width'],places=6)
-            self.assertAlmostEqual(min(y for x,y in points),0,places=6)
-            self.assertAlmostEqual(max(y for x,y in points),values['body_height'],places=6)
-            self.assertTrue(any('core_width' in x for x,y in expressions))
-            self.assertTrue(any('body_height' in y for x,y in expressions))
+            plan=timetable.analytic_outline_plan(p)
+            self.assertEqual(plan['kind'], 'analytic-arcs')
+            self.assertGreater(plan['horizontal_count'], 1)
+            self.assertGreater(plan['vertical_count'], 1)
+            self.assertGreater(plan['scallop_radius'],
+                               p['border_edge_gap'] + p['border_width'])
+            self.assertEqual(plan['bounds'], (0.0, p['core_width'] if 'core_width' in p else timetable.layout(p)['overall_width'],
+                                              0.0, timetable.layout(p)['body_height']))
+
+    def test_outline_uses_one_associative_offset_for_inner_ring(self):
+        source = SCRIPT.read_text(encoding='utf-8')
+        trim = source[source.index('def _build_trim'):source.index('def _build_board_labels_native')]
+        self.assertIn('createOffsetInput', trim)
+        self.assertIn('addOffset2', trim)
+        self.assertNotIn('wave_outline_expressions', trim)
+
+    def test_rounded_rect_anchors_and_sizes_native_parent_before_fillet(self):
+        source = SCRIPT.read_text(encoding='utf-8')
+        rect = source[source.index('def _anchored_rectangle_sketch'):
+                     source.index('def _anchored_circle_sketch')]
+        parent = rect.index('addTwoPointRectangle')
+        fillet = rect.index('addFillet')
+        self.assertLess(parent, fillet)
+        self.assertIn('parent_lines', rect)
+        self.assertIn('model_lines', rect)
+        self.assertIn('addCollinear(model_line, parent_line)', rect)
+        self.assertIn('_drive_point(sketch, core, axes, parent_lower_left', rect)
+        self.assertIn('width_expression)', rect)
+        self.assertIn('height_expression)', rect)
+        self.assertNotIn(' - 2 * slot_corner_radius', rect)
+
+    def test_trim_offsets_are_independent_and_allow_topology_changes(self):
+        source = SCRIPT.read_text(encoding='utf-8')
+        trim = source[source.index('def _build_trim'):source.index('def _build_board_labels_native')]
+        self.assertGreaterEqual(trim.count('createOffsetInput(\n        parent_curves'), 2)
+        self.assertGreaterEqual(trim.count('isTopologyMatched = False'), 2)
+        self.assertIn('profile.areaProperties().area', trim)
+        self.assertNotIn('list(outer_offset.childCurves)', trim)
 
 class NativeBuilderRegressionTest(unittest.TestCase):
     def test_board_cuts_use_current_body_and_plaque_magnets_match(self):
@@ -162,7 +201,7 @@ class NativeBuilderRegressionTest(unittest.TestCase):
                   yConstructionAxis='y', sketches=NS(add=lambda plane: NS()))
         design = NS(rootComponent=comp)
         fusion = NS(FeatureOperations=NS(NewBodyFeatureOperation='new', CutFeatureOperation='cut'))
-        with patch.multiple(timetable, _add_constrained_loop=lambda *a: None,
+        with patch.multiple(timetable, _add_analytic_loop=lambda *a: [],
                             _offset_plane=lambda *a: 'plane', _extrude=extrude,
                             _pattern_feature=pattern, _anchored_circle_sketch=circle,
                             _rectangle_sketch=rectangle):
@@ -183,15 +222,14 @@ class NativeBuilderRegressionTest(unittest.TestCase):
             self.assertAlmostEqual(calc(seed[8]),first)
             self.assertAlmostEqual(calc(seed[9]),values[anchor]+p[height_name]/2)
 
-    def test_native_wave_softness_changes_existing_expression_coordinates(self):
-        values = timetable.derived_values(timetable.DEFAULTS)
-        expressions = timetable.wave_outline_expressions(timetable.DEFAULTS)
-        def evaluate(softness):
-            local = dict(values,wave_softness=softness)
-            return [(eval(x.replace(' mm',''),{'__builtins__':{}},local),
-                     eval(y.replace(' mm',''),{'__builtins__':{}},local)) for x,y in expressions]
-        before, after = evaluate(0), evaluate(6)
-        self.assertTrue(any(math.dist(a,b)>.1 for a,b in zip(before,after)))
+    def test_native_arc_radius_tracks_pitch_and_amplitude(self):
+        base = timetable.analytic_outline_plan(timetable.DEFAULTS)
+        changed = timetable.analytic_outline_plan(dict(timetable.DEFAULTS,
+                                                       wave_pitch=12.0,
+                                                       wave_amplitude=1.2))
+        self.assertNotEqual(base['horizontal_radius'], changed['horizontal_radius'])
+        self.assertGreater(base['scallop_radius'],
+                           timetable.DEFAULTS['border_edge_gap'] + timetable.DEFAULTS['border_width'])
 
     def test_single_day_and_manual_card_length_derived_chain(self):
         for changes in ({'day_count':1}, {'auto_card_length':0}):
@@ -234,7 +272,7 @@ class FusionExpressionGrammarRegressionTest(unittest.TestCase):
 
 
 class CoordinateOffsetRegressionTest(unittest.TestCase):
-    def test_loop_coordinates_use_orthogonal_driving_offsets_and_shared_datums(self):
+    def test_driven_points_use_orthogonal_offsets_and_shared_datums(self):
         from types import SimpleNamespace as NS
         lines, offsets = [], []
         def line(a,b):
@@ -249,19 +287,17 @@ class CoordinateOffsetRegressionTest(unittest.TestCase):
             offsets.append((axis,point,dim))
             return dim
         sketch=NS(sketchCurves=NS(sketchLines=NS(addByTwoPoints=line)),
-            sketchPoints=NS(add=lambda p:NS(geometry=NS(x=p[0],y=p[1]))),
             sketchDimensions=NS(addOffsetDimension=offset))
         core=NS(Point3D=NS(create=lambda *a:a))
-        design=NS(unitsManager=NS(evaluateExpression=lambda e,u:float(e.replace(' mm',''))/10))
         axes=timetable._coordinate_axes(sketch,core)
-        pairs=[('0.2 mm','0.2 mm'),('180 mm','0.2 mm'),('180 mm','162 mm')]
-        timetable._add_constrained_loop(sketch,core,NS(),pairs,design,axes)
-        timetable._add_constrained_loop(sketch,core,NS(),pairs,design,axes)
+        point = NS(geometry=NS(x=18.0, y=16.2))
+        timetable._drive_point(sketch,core,axes,point,'width_expr','height_expr')
         self.assertEqual(sum(line.isConstruction for line in lines),2)
-        self.assertEqual(len(offsets),12)
-        for index,(axis,point,dim) in enumerate(offsets):
-            self.assertIs(axis,axes[index%2])
-            self.assertEqual(dim.parameter.expression,'abs('+pairs[(index//2)%3][index%2]+')')
+        self.assertEqual(len(offsets),2)
+        self.assertIs(offsets[0][0],axes[0])
+        self.assertIs(offsets[1][0],axes[1])
+        self.assertEqual(offsets[0][2].parameter.expression,'abs(width_expr)')
+        self.assertEqual(offsets[1][2].parameter.expression,'abs(height_expr)')
         self.assertNotEqual(axes[0].a[1],axes[0].b[1])
         self.assertNotEqual(axes[1].a[0],axes[1].b[0])
 

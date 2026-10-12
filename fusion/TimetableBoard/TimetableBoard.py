@@ -7,10 +7,12 @@ and cards use sketches and native extrude/cut features.
 
 The source SCAD uses text metrics to size plaques and a sinusoidal outline.
 Fusion's text metrics are not consistently exposed to scripts, so plaque
-widths are explicit parameters and the scalloped outline is sampled at run
-time. Board dimensions, grid positions, recess sizes, and feature heights
-remain linked to Change Parameters expressions. Rerun after changing wave
-pitch/amplitude when a different scallop count is wanted.
+widths are explicit parameters. The scalloped outline uses editable native
+circular arcs and an associative offset ring; it intentionally preserves the
+outer bounds and pitch topology without tessellating the source curve. Board
+dimensions, grid positions, recess sizes, and feature heights remain linked to
+Change Parameters expressions. Rerun after changing wave pitch/amplitude when
+a different scallop count is wanted.
 """
 import math
 import ast
@@ -39,10 +41,10 @@ DEFAULTS = {
     "core_width_ref": 240.0, "max_board_width": 254.0,
     "base_thickness": 5.6, "border_width": 1.6, "border_edge_gap": 2.0,
     "border_relief": 1.2, "wave_amplitude": 1.5, "wave_pitch": 9.8,
-    "wave_softness": 6.0, "corner_radius": 15.0,
+    "corner_radius": 15.0,
     "wall_hole_d": 4.0, "wall_hole_margin": 12.0,
     "card_width": 11.0, "row_pitch": 15.0,
-    "slot_depth": 0.01, "slot_tolerance": 0.0,
+    "slot_corner_radius": 3.4, "slot_depth": 0.01, "slot_tolerance": 0.0,
     "magnet_hole_d": 6.1, "magnet_hole_depth": 2.2,
     "magnet_center_pitch": 12.0, "magnet_end_inset": 6.5,
     "subtitle_block_length": 90.0, "subtitle_block_width": 17.0,
@@ -68,11 +70,12 @@ COMMENTS = {
     "max_board_width": "Giới hạn chiều rộng ngoài của bảng", "base_thickness": "Độ dày thân bảng",
     "border_width": "Bề rộng viền nổi", "border_edge_gap": "Khoảng cách viền tới mép lõi",
     "border_relief": "Chiều cao viền nổi", "wave_amplitude": "Biên độ sóng mép",
-    "wave_pitch": "Bước sóng mép", "wave_softness": "Độ mịn mẫu sóng",
+    "wave_pitch": "Bước sóng mép; đổi số cung cần Run lại",
     "corner_radius": "Bán kính góc ngoài", "wall_hole_d": "Đường kính lỗ treo",
     "wall_hole_margin": "Khoảng cách tâm lỗ tới mép lõi", "card_width": "Chiều rộng thẻ",
     "row_pitch": "Bước tâm giữa các hàng",
     "slot_depth": "Độ sâu rãnh thẻ", "slot_tolerance": "Dung sai rãnh",
+    "slot_corner_radius": "Bán kính bo góc rãnh, plaque và thẻ; mm",
     "magnet_hole_d": "Đường kính hốc nam châm", "magnet_hole_depth": "Độ sâu hốc nam châm",
     "magnet_center_pitch": "Bước tâm nam châm", "magnet_end_inset": "Khoảng cách hốc đầu tới mép thẻ",
     "subtitle_block_length": "Chiều dài plaque tên", "subtitle_block_width": "Chiều rộng plaque tên",
@@ -115,15 +118,16 @@ def validate(parameters):
     positive = ("base_thickness", "core_width_ref", "max_board_width", "wave_pitch",
                 "card_width", "row_pitch", "magnet_hole_d", "magnet_hole_depth",
                 "magnet_center_pitch", "subtitle_block_length", "slogan_block_length",
-                "title_size", "title_relief", "corner_radius", "slot_depth",
+                "title_size", "title_relief", "corner_radius", "slot_corner_radius", "slot_depth",
+                "wave_amplitude", "border_edge_gap", "border_width", "border_relief",
                 "subtitle_block_width", "slogan_block_width", "subject_text_relief")
     if any(not math.isfinite(float(p[name])) or float(p[name]) <= 0 for name in positive):
         raise ValueError("Kích thước phải là số dương hữu hạn.")
     for name in ("day_count", "morning_periods", "afternoon_periods"):
         if not math.isfinite(float(p[name])) or float(p[name]) != int(p[name]):
             raise ValueError(name + " phải là số nguyên hữu hạn.")
-    if p["wave_softness"] < 0 or p["slot_tolerance"] < 0:
-        raise ValueError("wave_softness và slot_tolerance không được âm.")
+    if p["slot_tolerance"] < 0:
+        raise ValueError("slot_tolerance không được âm.")
     if p["detachable_block_total_height"] - p["title_relief"] <= p["magnet_hole_depth"]:
         raise ValueError("Thân bảng tên không đủ dày cho hốc nam châm.")
     if p["subject_block_total_height"] - p["subject_text_relief"] <= p["magnet_hole_depth"]:
@@ -141,6 +145,13 @@ def validate(parameters):
     if p["fixed_card_length"] < 2 * p["magnet_end_inset"] + p["magnet_hole_d"]:
         raise ValueError("Thẻ cố định không đủ chỗ cho hốc nam châm.")
     result = layout(p, _validate=False)
+    if 2 * p["slot_corner_radius"] >= min(p["card_width"], result["card_length"],
+                                          p["subtitle_block_width"], p["subtitle_block_length"],
+                                          p["slogan_block_width"], p["slogan_block_length"], 23.4):
+        raise ValueError("slot_corner_radius phải nhỏ hơn nửa cạnh ngắn của các rectangle.")
+    if 2 * p["corner_radius"] >= min(result["core_width"],
+                                     result["body_height"] - 2 * p["wave_amplitude"]):
+        raise ValueError("corner_radius quá lớn: không còn đoạn mép để tạo cung sóng.")
     if result["overall_width"] > p["max_board_width"] + 1e-9:
         raise ValueError("Bảng vượt max_board_width.")
     if result["card_length"] <= 2 * p["magnet_end_inset"] + p["magnet_hole_d"]:
@@ -223,56 +234,108 @@ def derived_values(parameters):
                           {'__builtins__':{},'floor':math.floor,'max':max,'min':min},values)
     return values
 
-def wave_outline_expressions(p, inset='0 mm'):
-    """Rounded wave outline. Wave count is chosen at Run; all vertices resize.
+def analytic_outline_plan(p):
+    """Return the compact native-arc plan used by the Fusion builder.
 
-    Each straight edge has 8 segments per wave. Corner waves use 12 segments
-    per quadrant. Offsetting a parallel inner outline retains a single ring.
+    Each straight edge is made from circular scallops whose chord is the
+    actual pitch after the run-time count is selected.  The radius is the
+    circular-arc radius for the requested sagitta (``wave_amplitude``), not a
+    polyline sample.  The final inner boundary uses Fusion's associative
+    offset constraint, which may trim/change topology at scallop junctions.
     """
-    points=[]
-    r='corner_radius'
-    amp='wave_amplitude'
-    left='wave_amplitude'
-    right='wave_amplitude + core_width'
-    bottom='wave_amplitude'
-    top='body_height-wave_amplitude'
-    w='core_width-2*corner_radius'
-    h='body_height-2*wave_amplitude-2*corner_radius'
-    layout_result=layout(p)
-    lengths=[layout_result['core_width']-2*p['corner_radius'],
-             layout_result['body_height']-2*p['wave_amplitude']-2*p['corner_radius']]
-    counts=[max(1,round(length/p['wave_pitch'])) for length in lengths]
-    def wave(t,n):
-        v=math.sin(2*math.pi*n*t)
-        return f'({v:.15g} + (0.5*wave_softness/(wave_softness+0.5))*{v-v*v*v:.15g})'
-    for edge in range(4):
-        n=counts[edge%2]
-        for i in range(n*8):
-            t=i/(n*8)
-            q=format(t,'.15g')
-            v=wave(t,n)
-            if edge==0:
-                x=f'{left}+{r}+({w})*{q}'
-                y=f'{bottom}+({inset})-{amp}*{v}'
-            elif edge==1:
-                x=f'{right}-({inset})+{amp}*{v}'
-                y=f'{bottom}+{r}+({h})*{q}'
-            elif edge==2:
-                x=f'{right}-{r}-({w})*{q}'
-                y=f'{top}-({inset})+{amp}*{v}'
-            else:
-                x=f'{left}+({inset})-{amp}*{v}'
-                y=f'{top}-{r}-({h})*{q}'
-            points.append((x,y))
-        centers=[(f'{right}-{r}',f'{bottom}+{r}'),(f'{right}-{r}',f'{top}-{r}'),
-                 (f'{left}+{r}',f'{top}-{r}'),(f'{left}+{r}',f'{bottom}+{r}')]
-        cx,cy=centers[edge]
-        for i in range(12):
-            angle=math.radians(-90+90*edge+90*i/12)
-            radius=f'({r}-({inset})+{amp}*{wave(i/12,1)})'
-            points.append((f'{cx}+{radius}*{math.cos(angle):.15g}',
-                           f'{cy}+{radius}*{math.sin(angle):.15g}'))
-    return points
+    result = layout(p, _validate=False)
+    horizontal_length = result["core_width"] - 2 * p["corner_radius"]
+    vertical_length = result["body_height"] - 2 * p["wave_amplitude"] - 2 * p["corner_radius"]
+    horizontal_count = max(1, round(horizontal_length / p["wave_pitch"]))
+    vertical_count = max(1, round(vertical_length / p["wave_pitch"]))
+    horizontal_pitch = horizontal_length / horizontal_count
+    vertical_pitch = vertical_length / vertical_count
+    amp = p["wave_amplitude"]
+    horizontal_radius = horizontal_pitch * horizontal_pitch / (8 * amp) + amp / 2
+    vertical_radius = vertical_pitch * vertical_pitch / (8 * amp) + amp / 2
+    return {
+        "kind": "analytic-arcs",
+        "horizontal_count": horizontal_count,
+        "vertical_count": vertical_count,
+        "horizontal_pitch": horizontal_pitch,
+        "vertical_pitch": vertical_pitch,
+        "horizontal_radius": horizontal_radius,
+        "vertical_radius": vertical_radius,
+        "scallop_radius": min(horizontal_radius, vertical_radius),
+        "bounds": (0.0, result["overall_width"], 0.0, result["body_height"]),
+    }
+
+
+def _arc_spec(center, start, sweep, center_x, center_y, radius_expression,
+              expected_end):
+    return {"center": center, "start": start, "sweep": sweep,
+            "center_x": center_x, "center_y": center_y,
+            "radius_expression": radius_expression, "end": expected_end}
+
+
+def _analytic_arc_specs(p):
+    """Build native arc descriptors without sampled model vertices."""
+    plan = analytic_outline_plan(p)
+    result = layout(p, _validate=False)
+    amp, corner = p["wave_amplitude"], p["corner_radius"]
+    x0, x1 = amp, amp + result["core_width"]
+    y0, y1 = amp, result["body_height"] - amp
+    cx_l, cx_r = x0 + corner, x1 - corner
+    cy_b, cy_t = y0 + corner, y1 - corner
+    specs = []
+    hp, vp = plan["horizontal_pitch"], plan["vertical_pitch"]
+    hr, vr = plan["horizontal_radius"], plan["vertical_radius"]
+    hsweep = 2 * math.asin(hp / (2 * hr))
+    vsweep = 2 * math.asin(vp / (2 * vr))
+    h_pitch_expr = "(core_width - 2 * corner_radius) / {}".format(plan["horizontal_count"])
+    v_pitch_expr = "(body_height - 2 * wave_amplitude - 2 * corner_radius) / {}".format(plan["vertical_count"])
+    h_radius_expr = "(({} * {}) / (8 * wave_amplitude) + wave_amplitude / 2)".format(h_pitch_expr, h_pitch_expr)
+    v_radius_expr = "(({} * {}) / (8 * wave_amplitude) + wave_amplitude / 2)".format(v_pitch_expr, v_pitch_expr)
+    for i in range(plan["horizontal_count"]):
+        left = cx_l + i * hp
+        right = cx_l + (i + 1) * hp
+        center = ((left + right) / 2, y0 + hr - amp)
+        specs.append(_arc_spec(center, (left, y0), hsweep,
+                               "wave_amplitude + corner_radius + ({} + 0.5) * ({})".format(i, h_pitch_expr),
+                               "wave_amplitude + ({}) - wave_amplitude".format(h_radius_expr),
+                               h_radius_expr, (right, y0)))
+    specs.append(_arc_spec((cx_r, cy_b), (cx_r, y0), math.pi / 2,
+                           "wave_amplitude + core_width - corner_radius", "wave_amplitude + corner_radius",
+                           "corner_radius", (x1, cy_b)))
+    for i in range(plan["vertical_count"]):
+        bottom = cy_b + i * vp
+        top = cy_b + (i + 1) * vp
+        center = (x1 - vr + amp, (bottom + top) / 2)
+        specs.append(_arc_spec(center, (x1, bottom), vsweep,
+                               "wave_amplitude + core_width - ({}) + wave_amplitude".format(v_radius_expr),
+                               "wave_amplitude + corner_radius + ({} + 0.5) * ({})".format(i, v_pitch_expr),
+                               v_radius_expr, (x1, top)))
+    specs.append(_arc_spec((cx_r, cy_t), (x1, cy_t), math.pi / 2,
+                           "wave_amplitude + core_width - corner_radius", "body_height - wave_amplitude - corner_radius",
+                           "corner_radius", (cx_r, y1)))
+    for i in range(plan["horizontal_count"]):
+        right = cx_r - i * hp
+        left = cx_r - (i + 1) * hp
+        center = ((left + right) / 2, y1 - hr + amp)
+        specs.append(_arc_spec(center, (right, y1), hsweep,
+                               "wave_amplitude + core_width - corner_radius - ({} + 0.5) * ({})".format(i, h_pitch_expr),
+                               "body_height - wave_amplitude - ({}) + wave_amplitude".format(h_radius_expr),
+                               h_radius_expr, (left, y1)))
+    specs.append(_arc_spec((cx_l, cy_t), (cx_l, y1), math.pi / 2,
+                           "wave_amplitude + corner_radius", "body_height - wave_amplitude - corner_radius",
+                           "corner_radius", (x0, cy_t)))
+    for i in range(plan["vertical_count"]):
+        top = cy_t - i * vp
+        bottom = cy_t - (i + 1) * vp
+        center = (x0 + vr - amp, (bottom + top) / 2)
+        specs.append(_arc_spec(center, (x0, top), vsweep,
+                               "wave_amplitude + ({}) - wave_amplitude".format(v_radius_expr),
+                               "body_height - wave_amplitude - corner_radius - ({} + 0.5) * ({})".format(i, v_pitch_expr),
+                               v_radius_expr, (x0, bottom)))
+    specs.append(_arc_spec((cx_l, cy_b), (x0, cy_b), math.pi / 2,
+                           "wave_amplitude + corner_radius", "wave_amplitude + corner_radius",
+                           "corner_radius", (cx_l, y0)))
+    return specs
 
 def _value(core, expression):
     return core.ValueInput.createByString(expression)
@@ -285,10 +348,71 @@ def _collection(core, items):
     return result
 
 
+def _drive_point(sketch, core, axes, point, x_expression, y_expression):
+    """Drive one sketch point from the shared construction datums."""
+    for axis, expression in enumerate((x_expression, y_expression)):
+        coordinate = point.geometry.x if axis == 0 else point.geometry.y
+        if abs(coordinate) < 1e-8:
+            if axis == 0:
+                sketch.geometricConstraints.addVerticalPoints(sketch.originPoint, point)
+            else:
+                sketch.geometricConstraints.addHorizontalPoints(sketch.originPoint, point)
+        else:
+            dimension = sketch.sketchDimensions.addOffsetDimension(
+                axes[axis], point, core.Point3D.create(point.geometry.x + .03,
+                                                       point.geometry.y + .03, 0), True)
+            dimension.parameter.expression = "abs(" + expression + ")"
+
+
+def _add_analytic_loop(sketch, core, fusion, p):
+    """Create the board outline from native circular arcs and constraints."""
+    axes = _coordinate_axes(sketch, core)
+    arcs = []
+    specs = _analytic_arc_specs(p)
+    for spec in specs:
+        center = core.Point3D.create(spec["center"][0] / 10,
+                                     spec["center"][1] / 10, 0)
+        start = core.Point3D.create(spec["start"][0] / 10,
+                                    spec["start"][1] / 10, 0)
+        arc = sketch.sketchCurves.sketchArcs.addByCenterStartSweep(
+            center, start, spec["sweep"])
+        if arc is None:
+            raise RuntimeError("Không tạo được cung native của outline.")
+        _drive_point(sketch, core, axes, arc.centerSketchPoint,
+                     spec["center_x"], spec["center_y"])
+        radius_dimension = sketch.sketchDimensions.addRadialDimension(
+            arc, core.Point3D.create(spec["center"][0] / 10 + .03,
+                                     spec["center"][1] / 10 + .03, 0))
+        radius_dimension.parameter.expression = spec["radius_expression"]
+        arcs.append((arc, spec))
+
+    def endpoint(arc, target):
+        target = (target[0] / 10, target[1] / 10)
+        candidates = (arc.startSketchPoint, arc.endSketchPoint)
+        return min(candidates, key=lambda point: (
+            (point.geometry.x - target[0]) ** 2 +
+            (point.geometry.y - target[1]) ** 2))
+
+    for index, (arc, spec) in enumerate(arcs):
+        next_arc, next_spec = arcs[(index + 1) % len(arcs)]
+        join_point = spec["end"]
+        sketch.geometricConstraints.addCoincident(
+            endpoint(arc, join_point), endpoint(next_arc, join_point))
+    if not sketch.isFullyConstrained:
+        raise RuntimeError("Sketch outline cung tròn chưa đủ ràng buộc.")
+    return [arc for arc, _ in arcs]
+
+
 def _anchored_rectangle_sketch(comp, core, fusion, x, y, width, height, name,
                                plane=None, x_expression=None, y_expression=None,
                                width_expression=None, height_expression=None):
-    """Create a rectangle whose four corner coordinates are driving dimensions."""
+    """Create a parent rectangle, then fillet it without changing its bbox.
+
+    The position and full extents belong to the native four-line rectangle.
+    Fillet trims the straight segments, so dimensions must not be attached to
+    those shortened tangent segments.  Keeping the parent dimensions also
+    makes the x/y anchor independent of which corner Fusion trims first.
+    """
     sketch = comp.sketches.add(plane or comp.xYConstructionPlane)
     sketch.name = name
     point = core.Point3D.create
@@ -296,33 +420,86 @@ def _anchored_rectangle_sketch(comp, core, fusion, x, y, width, height, name,
     y_expression = y_expression or "{} mm".format(y)
     width_expression = width_expression or "{} mm".format(width)
     height_expression = height_expression or "{} mm".format(height)
-    points = [
-        sketch.sketchPoints.add(point(x / 10, y / 10, 0)),
-        sketch.sketchPoints.add(point((x + width) / 10, y / 10, 0)),
-        sketch.sketchPoints.add(point((x + width) / 10, (y + height) / 10, 0)),
-        sketch.sketchPoints.add(point(x / 10, (y + height) / 10, 0)),
+    parent_lower_left = sketch.sketchPoints.add(point(x / 10, y / 10, 0))
+    parent_upper_right = sketch.sketchPoints.add(
+        point((x + width) / 10, (y + height) / 10, 0))
+    parent_rectangle = sketch.sketchCurves.sketchLines.addTwoPointRectangle(
+        parent_lower_left, parent_upper_right)
+    if parent_rectangle is None:
+        raise RuntimeError("Không tạo được parent rectangle: " + name)
+    parent_lines = [parent_rectangle.item(i) for i in range(parent_rectangle.count)]
+    for line in parent_lines:
+        line.isConstruction = True
+    axes = _coordinate_axes(sketch, core)
+    # These are the four dimensions of the construction parent.  Its sharp
+    # corners are never passed to addFillet, so the outer bbox remains stable
+    # when the independent model-copy lines are trimmed.
+    _drive_point(sketch, core, axes, parent_lower_left, x_expression, y_expression)
+    horizontal_dimension = sketch.sketchDimensions.addDistanceDimension(
+        parent_lower_left, parent_upper_right,
+        fusion.DimensionOrientations.HorizontalDimensionOrientation,
+        point(parent_upper_right.geometry.x + .03,
+              parent_upper_right.geometry.y + .03, 0))
+    horizontal_dimension.parameter.expression = "abs({})".format(width_expression)
+    vertical_dimension = sketch.sketchDimensions.addDistanceDimension(
+        parent_lower_left, parent_upper_right,
+        fusion.DimensionOrientations.VerticalDimensionOrientation,
+        point(parent_upper_right.geometry.x + .03,
+              parent_upper_right.geometry.y + .03, 0))
+    vertical_dimension.parameter.expression = "abs({})".format(height_expression)
+
+    # The visible rectangle deliberately uses independent Point3D endpoints;
+    # no model endpoint is coincident with a parent corner.  Collinear support
+    # constraints make all four sides follow the driven parent without making
+    # the parent corners part of the fillet operation.
+    model_lines = [
+        sketch.sketchCurves.sketchLines.addByTwoPoints(
+            point(x / 10, y / 10, 0), point((x + width) / 10, y / 10, 0)),
+        sketch.sketchCurves.sketchLines.addByTwoPoints(
+            point((x + width) / 10, y / 10, 0),
+            point((x + width) / 10, (y + height) / 10, 0)),
+        sketch.sketchCurves.sketchLines.addByTwoPoints(
+            point((x + width) / 10, (y + height) / 10, 0),
+            point(x / 10, (y + height) / 10, 0)),
+        sketch.sketchCurves.sketchLines.addByTwoPoints(
+            point(x / 10, (y + height) / 10, 0), point(x / 10, y / 10, 0)),
     ]
-    lines = sketch.sketchCurves.sketchLines
-    for index in range(4):
-        lines.addByTwoPoints(points[index], points[(index + 1) % 4])
-    x_values = (x_expression, "({}) + ({})".format(x_expression, width_expression),
-                "({}) + ({})".format(x_expression, width_expression), x_expression)
-    y_values = (y_expression, y_expression,
-                "({}) + ({})".format(y_expression, height_expression),
-                "({}) + ({})".format(y_expression, height_expression))
-    axes = _coordinate_axes(sketch,core)
-    for item, x_value, y_value in zip(points, x_values, y_values):
-        for axis, expression in enumerate((x_value, y_value)):
-            coordinate=item.geometry.x if axis==0 else item.geometry.y
-            if abs(coordinate)<1e-8:
-                if axis==0:
-                    sketch.geometricConstraints.addVerticalPoints(sketch.originPoint,item)
-                else:
-                    sketch.geometricConstraints.addHorizontalPoints(sketch.originPoint,item)
-            else:
-                dim=sketch.sketchDimensions.addOffsetDimension(axes[axis],item,
-                    point(item.geometry.x+.3,item.geometry.y+.3,0),True)
-                dim.parameter.expression='abs('+expression+')'
+    if any(line is None for line in model_lines):
+        raise RuntimeError("Không tạo được model rectangle: " + name)
+    for model_line in model_lines:
+        dx = abs(model_line.startSketchPoint.geometry.x -
+                 model_line.endSketchPoint.geometry.x)
+        dy = abs(model_line.startSketchPoint.geometry.y -
+                 model_line.endSketchPoint.geometry.y)
+        if dx > dy:
+            parent_line = min(parent_lines, key=lambda candidate: abs(
+                ((candidate.startSketchPoint.geometry.y + candidate.endSketchPoint.geometry.y) / 2) -
+                ((model_line.startSketchPoint.geometry.y + model_line.endSketchPoint.geometry.y) / 2)))
+        else:
+            parent_line = min(parent_lines, key=lambda candidate: abs(
+                ((candidate.startSketchPoint.geometry.x + candidate.endSketchPoint.geometry.x) / 2) -
+                ((model_line.startSketchPoint.geometry.x + model_line.endSketchPoint.geometry.x) / 2)))
+        sketch.geometricConstraints.addCollinear(model_line, parent_line)
+    for index, model_line in enumerate(model_lines):
+        sketch.geometricConstraints.addCoincident(
+            model_line.endSketchPoint,
+            model_lines[(index + 1) % len(model_lines)].startSketchPoint)
+
+    # Process corners in the line flow order so each subsequent fillet uses
+    # the opposite, still-untrimmed endpoint of its shared line.
+    for index, line_a in enumerate(model_lines):
+        line_b = model_lines[(index + 1) % len(model_lines)]
+        point_a = line_a.endSketchPoint.geometry
+        point_b = line_b.startSketchPoint.geometry
+        arc = sketch.sketchCurves.sketchArcs.addFillet(
+            line_a, point_a, line_b, point_b,
+            float(DEFAULTS["slot_corner_radius"] / 10))
+        if arc is None:
+            raise RuntimeError("Không tạo được fillet parent rectangle: " + name)
+        radius_dimension = sketch.sketchDimensions.addRadialDimension(
+            arc, core.Point3D.create(arc.centerSketchPoint.geometry.x + .03,
+                                     arc.centerSketchPoint.geometry.y + .03, 0))
+        radius_dimension.parameter.expression = "slot_corner_radius"
     if not sketch.isFullyConstrained:
         raise RuntimeError("Sketch chưa đủ ràng buộc: " + name)
     return sketch
@@ -358,7 +535,7 @@ def _add_user_parameters(design, core):
     for name, number in DEFAULTS.items():
         units = "" if name in ("day_count", "morning_periods", "afternoon_periods",
                                 "show_morning", "show_afternoon", "show_wall_holes",
-                                "auto_card_length", "baseline_periods", "wave_softness") else "mm"
+                                "auto_card_length", "baseline_periods") else "mm"
         design.userParameters.add(name, value(str(number) + (" mm" if units else "")), units,
                                   COMMENTS.get(name, "Tham số nguồn SCAD."))
     for name, (expression, units) in DERIVED.items():
@@ -393,28 +570,6 @@ def _coordinate_axes(sketch, core):
         axes.append(line)
     return axes
 
-
-def _add_constrained_loop(sketch, core, fusion, expressions, design, axes=None):
-    points=[]
-    if axes is None:
-        axes=_coordinate_axes(sketch,core)
-    for pair in expressions:
-        coords=[design.unitsManager.evaluateExpression(expr,'mm') for expr in pair]
-        point=sketch.sketchPoints.add(core.Point3D.create(*coords,0))
-        for axis,expr in enumerate(pair):
-            if abs(coords[axis])<1e-8:
-                if axis==0:
-                    sketch.geometricConstraints.addVerticalPoints(sketch.originPoint,point)
-                else:
-                    sketch.geometricConstraints.addHorizontalPoints(sketch.originPoint,point)
-            else:
-                dim=sketch.sketchDimensions.addOffsetDimension(axes[axis],point,
-                    core.Point3D.create(coords[0]+.05,coords[1]+.05,0),True)
-                dim.parameter.expression='abs('+expr+')'
-        points.append(point)
-    for i,point in enumerate(points):
-        sketch.sketchCurves.sketchLines.addByTwoPoints(point,points[(i+1)%len(points)])
-    return points
 
 def _add_text(sketch, core, text, height_mm, x_mm, y_mm, width_mm,
               height_expression=None, x_expression=None, y_expression=None,
@@ -539,8 +694,8 @@ def _build_board(design, fusion, core, p, layout_result):
     comp = design.rootComponent
     width, height = layout_result["overall_width"], layout_result["body_height"]
     outline=comp.sketches.add(comp.xYConstructionPlane)
-    outline.name='Rounded wave board outline'
-    _add_constrained_loop(outline,core,fusion,wave_outline_expressions(p),design)
+    outline.name='Analytic scallop board outline'
+    _add_analytic_loop(outline, core, fusion, p)
     board_feature=_extrude(comp,fusion,core,outline,fusion.FeatureOperations.NewBodyFeatureOperation,
                            'base_thickness','Main board')
     board=board_feature.bodies.item(0)
@@ -560,6 +715,9 @@ def _build_board(design, fusion, core, p, layout_result):
             board = cut.bodies.item(0)
 
     slot_floor = _offset_plane(comp, core, "base_thickness - slot_depth", "Board slot floor")
+    magnet_plane = _offset_plane(comp, core,
+                                 "base_thickness - slot_depth - magnet_hole_depth",
+                                 "Board magnet plane")
     grid_left = layout_result["grid_left"]
 
     def schedule_pattern(y, rows, y_expression, name):
@@ -607,9 +765,8 @@ def _build_board(design, fusion, core, p, layout_result):
                  "slot_depth", name, board)
         board = cut.bodies.item(0)
         first = "({}) + ({} - floor(({} - 2 * magnet_end_inset) / magnet_center_pitch) * magnet_center_pitch) / 2".format(x_expression,w_expression,w_expression)
-        plane = _offset_plane(comp, core, "base_thickness - slot_depth - magnet_hole_depth", name + " magnet plane")
         seed = _anchored_circle_sketch(comp, core, fusion, x+w/2, y+h/2,
-            p["magnet_hole_d"], name+" magnet seed", plane, first,
+            p["magnet_hole_d"], name+" magnet seed", magnet_plane, first,
             "({}) + ({}) / 2".format(y_expression,h_expression), "magnet_hole_d")
         cut = _extrude(comp, fusion, core, seed, fusion.FeatureOperations.CutFeatureOperation,
             "magnet_hole_depth", name+" magnet seed cut", board)
@@ -626,9 +783,8 @@ def _build_board(design, fusion, core, p, layout_result):
         first = (layout_result["card_length"] - (count - 1) * p["magnet_center_pitch"]) / 2
         x = grid_left + first
         x_expression = "grid_left + (card_length - (magnet_count - 1) * magnet_center_pitch) / 2"
-        plane = _offset_plane(comp, core, "base_thickness - slot_depth - magnet_hole_depth", name + " plane")
         seed = _anchored_circle_sketch(comp, core, fusion, x, y + p["card_width"] / 2,
-                                       p["magnet_hole_d"], name + " seed", plane,
+                                       p["magnet_hole_d"], name + " seed", magnet_plane,
                                        x_expression, "{} + card_width / 2".format(y_expression),
                                        "magnet_hole_d")
         cut = _extrude(comp, fusion, core, seed, fusion.FeatureOperations.CutFeatureOperation,
@@ -655,26 +811,53 @@ def _build_board(design, fusion, core, p, layout_result):
 
 
 def _build_trim(design, fusion, core, p, layout_result, board):
-    comp=design.rootComponent
-    plane=_offset_plane(comp,core,'base_thickness','Raised trim plane')
-    sketch=comp.sketches.add(plane)
-    sketch.name='Wave ring profile'
-    axes=_coordinate_axes(sketch,core)
-    _add_constrained_loop(sketch,core,fusion,wave_outline_expressions(p,'border_edge_gap'),design,axes)
-    _add_constrained_loop(sketch,core,fusion,wave_outline_expressions(p,'border_edge_gap+border_width'),design,axes)
+    comp = design.rootComponent
+    plane = _offset_plane(comp, core, 'base_thickness', 'Raised trim plane')
+    sketch = comp.sketches.add(plane)
+    sketch.name = 'Associative scallop trim profile'
+    parent_curves = _add_analytic_loop(sketch, core, fusion, p)
+    constraints = sketch.geometricConstraints
+    outer_input = constraints.createOffsetInput(
+        parent_curves, _value(core, '-border_edge_gap'))
+    if outer_input is None:
+        raise RuntimeError('Không tạo được offset ngoài của viền.')
+    outer_input.isTopologyMatched = False
+    outer_offset = constraints.addOffset2(outer_input)
+    if outer_offset is None or not outer_offset.childCurves:
+        raise RuntimeError('Offset ngoài không trả về curve con.')
+    outer_offset.dimension.parameter.expression = '-border_edge_gap'
+    # Offset childCurves are not guaranteed to retain the parent's flow order.
+    # Build the inner edge from the same ordered loop so the two expressions
+    # stay independent and the ring remains associative when topology changes.
+    inner_input = constraints.createOffsetInput(
+        parent_curves, _value(core, '-(border_edge_gap + border_width)'))
+    if inner_input is None:
+        raise RuntimeError('Không tạo được offset trong của viền.')
+    inner_input.isTopologyMatched = False
+    inner_offset = constraints.addOffset2(inner_input)
+    if inner_offset is None or not inner_offset.childCurves:
+        raise RuntimeError('Offset trong không trả về curve con.')
+    inner_offset.dimension.parameter.expression = '-(border_edge_gap + border_width)'
     if not sketch.isFullyConstrained:
-        raise RuntimeError('Wave ring sketch is not fully constrained.')
-    rings=[profile for profile in sketch.profiles if profile.profileLoops.count==2]
-    if len(rings)!=1:
-        raise RuntimeError('Expected one ring profile with a single inner hole.')
-    feature=_extrude_entity(comp,fusion,core,rings[0],fusion.FeatureOperations.NewBodyFeatureOperation,
-                            'border_relief','Raised wave ring')
-    return _join_body(comp,fusion,core,board,list(feature.bodies),'Join raised wave ring')
+        raise RuntimeError('Sketch viền offset chưa đủ ràng buộc.')
+    rings = [profile for profile in sketch.profiles if profile.profileLoops.count == 2]
+    if not rings:
+        raise RuntimeError('Expected an associative offset ring profile.')
+    # The source loop remains in the sketch to keep both offsets associative.
+    # Pick the narrowest annular profile, which is the border_width band.
+    ring = min(rings, key=lambda profile: profile.areaProperties().area)
+    feature = _extrude_entity(comp, fusion, core, ring,
+                              fusion.FeatureOperations.NewBodyFeatureOperation,
+                              'border_relief', 'Raised associative scallop ring')
+    return _join_body(comp, fusion, core, board, list(feature.bodies),
+                      'Join raised associative scallop ring')
 
 def _build_board_labels_native(design, fusion, core, p, layout_result, board):
     """Join each native SketchText extrusion into the board body."""
     comp = design.rootComponent
     width = layout_result["overall_width"]
+    text_plane = _offset_plane(comp, core, "base_thickness - 0.01 mm",
+                               "Board label text plane")
     support = _rectangle_sketch(
         comp, core, width / 2 - 60, layout_result["body_height"] - 12.6, 120, 23.4,
         "Title backing native", fusion=fusion,
@@ -682,25 +865,26 @@ def _build_board_labels_native(design, fusion, core, p, layout_result, board):
         y_expression="body_height - 12.6 mm", width_expression="120 mm",
         height_expression="23.4 mm")
     support_feature = _extrude(comp, fusion, core, support,
-                               fusion.FeatureOperations.NewBodyFeatureOperation,
+                               fusion.FeatureOperations.JoinFeatureOperation,
                                "base_thickness", "Title backing native")
-    board = _join_body(comp, fusion, core, board, list(support_feature.bodies),
-               "Join title backing native")
+    # At this stage the board is the only existing solid.  A native Join
+    # keeps the backing in the same body and removes a separate Combine step.
+    board = support_feature.bodies.item(0)
 
     def text_join(label, height, x, y, text_width, name, x_expr, y_expr,
                   width_expr):
         nonlocal board
-        plane = _offset_plane(comp, core, "base_thickness - 0.01 mm", name + " plane")
-        sketch = comp.sketches.add(plane)
+        sketch = comp.sketches.add(text_plane)
         sketch.name = name + " sketch"
         text = _add_text(sketch, core, label, height, x, y, text_width,
                          x_expression=x_expr, y_expression=y_expr,
                          width_expression=width_expr, height_expression="title_size" if name=="Native title" else "6 mm")
         feature = _extrude_entity(comp, fusion, core, text,
-                                  fusion.FeatureOperations.NewBodyFeatureOperation,
+                                  fusion.FeatureOperations.JoinFeatureOperation,
                                   "border_relief", name)
-        board = _join_body(comp, fusion, core, board, list(feature.bodies),
-                   "Join " + name)
+        # The text plane is 0.01 mm inside the board top, so each glyph
+        # intersects this sole target body and Fusion can join it directly.
+        board = feature.bodies.item(0)
 
     text_join("Thời khóa biểu", p["title_size"], width / 2 - 60,
               layout_result["title_y"] - 9, 120, "Native title",
@@ -728,7 +912,7 @@ def _build_board_labels_native(design, fusion, core, p, layout_result, board):
 
 
 def _build_plaque_native(design, fusion, core, p, label, width, height, x, y,
-                         name, width_expression, y_expression):
+                         name, width_expression, y_expression, text_plane=None):
     """Build a plaque base and its raised text as separate native features."""
     comp = design.rootComponent
     height_expression = "subtitle_block_width" if width_expression == "subtitle_block_length" else "slogan_block_width"
@@ -742,9 +926,10 @@ def _build_plaque_native(design, fusion, core, p, label, width, height, x, y,
                             "detachable_block_total_height - title_relief", name + " native")
     body = base_feature.bodies.item(0)
     body.name = name
-    text_plane = _offset_plane(comp, core,
-                               "detachable_block_total_height - title_relief",
-                               name + " native text plane")
+    if text_plane is None:
+        text_plane = _offset_plane(comp, core,
+                                   "detachable_block_total_height - title_relief",
+                                   "Detachable text plane")
     text_sketch = comp.sketches.add(text_plane)
     text = _add_text(text_sketch, core, label, min(height * 0.55, 8), x + 1,
                      y + height * 0.2, width - 2,
@@ -771,7 +956,8 @@ def _build_plaque_native(design, fusion, core, p, label, width, height, x, y,
     return result
 
 
-def _build_subject_card_native(design, fusion, core, p, label, index, x, y, length):
+def _build_subject_card_native(design, fusion, core, p, label, index, x, y, length,
+                               text_plane=None):
     """Build one detached subject card with separately raised native text."""
     comp = design.rootComponent
     column, row = index % 5, index // 5
@@ -787,8 +973,8 @@ def _build_subject_card_native(design, fusion, core, p, label, index, x, y, leng
                        "Subject {:02d} native {}".format(index + 1, label))
     body = feature.bodies.item(0)
     body.name = "Subject {:02d} - {}".format(index + 1, label)
-    text_plane = _offset_plane(comp, core, "card_height",
-                               "Subject {:02d} native text plane".format(index + 1))
+    if text_plane is None:
+        text_plane = _offset_plane(comp, core, "card_height", "Subject text plane")
     text_sketch = comp.sketches.add(text_plane)
     text = _add_text(text_sketch, core, label, min(p["card_width"] * 0.48, 6),
                      x + 1, y + 2, length - 2,
@@ -818,10 +1004,12 @@ def _build_subject_card_native(design, fusion, core, p, label, index, x, y, leng
 
 def _build_subject_sheet_native(design, fusion, core, p, layout_result):
     sheet, bodies = subject_sheet_layout(p), []
+    text_plane = _offset_plane(design.rootComponent, core, "card_height",
+                               "Subject text plane")
     for card in sheet["cards"]:
         bodies.append(_build_subject_card_native(
             design, fusion, core, p, card["label"], card["index"], card["x"], card["y"],
-            layout_result["card_length"]))
+            layout_result["card_length"], text_plane))
     return bodies
 
 
@@ -917,16 +1105,20 @@ def run(context):
         board = _build_board_labels_native(design, fusion, core, p, expected, board)
         board = _build_trim(design, fusion, core, p, expected, board)
         update("Detached plaques", 3)
+        detachable_text_plane = _offset_plane(
+            design.rootComponent, core,
+            "detachable_block_total_height - title_relief",
+            "Detachable text plane")
         _build_plaque_native(design, fusion, core, p, "Học sinh mẫu", p["subtitle_block_length"],
                       p["subtitle_block_width"],
                       (expected["overall_width"] - p["subtitle_block_length"]) / 2,
                       expected["body_height"]+30, "Name plaque", "subtitle_block_length",
-                      "body_height + 30 mm")
+                      "body_height + 30 mm", detachable_text_plane)
         _build_plaque_native(design, fusion, core, p, "Believe in Yourself", p["slogan_block_length"],
                       p["slogan_block_width"],
                       (expected["overall_width"] - p["slogan_block_length"]) / 2,
                       expected["body_height"]+60, "Slogan plaque", "slogan_block_length",
-                      "body_height + 60 mm")
+                      "body_height + 60 mm", detachable_text_plane)
         update("Fourteen detached subject cards", 4)
         _build_subject_sheet_native(design, fusion, core, p, expected)
         update("Recompute and health checks", 5)
