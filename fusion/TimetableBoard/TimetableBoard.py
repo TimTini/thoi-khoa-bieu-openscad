@@ -387,6 +387,9 @@ def _coordinate_axes(sketch, core):
             core.Point3D.create(*start),core.Point3D.create(*end))
         line.isConstruction=True
         line.isFixed=True
+        # Fixing a line leaves its endpoints free to slide along it in Fusion.
+        line.startSketchPoint.isFixed=True
+        line.endSketchPoint.isFixed=True
         axes.append(line)
     return axes
 

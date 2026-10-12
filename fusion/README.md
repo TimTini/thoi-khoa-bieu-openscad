@@ -101,3 +101,7 @@ Fusion đã báo `Invalid expression` ở bước tạo derived parameters. Đã
 Log thực tế xác nhận đã qua bước parameters và lỗi `VCS_SKETCH_OVER_CONSTRAINTS` khi dựng outline. Đã đổi các dimension tọa độ từ khoảng cách điểm–gốc sang `addOffsetDimension` vuông góc với hai trục dựng cố định. Chỉ trục tham chiếu là fixed/construction; các điểm hình học vẫn do driving expressions điều khiển. Áp dụng cho outline, rectangle, tâm lỗ và vị trí text; chiều rộng/cao text vẫn dùng dimension riêng. Hai vòng viền dùng chung cặp trục. **17 test offline + compile đạt**, chưa xác nhận bản sửa này bằng Fusion runtime.
 
 API: https://help.autodesk.com/cloudhelp/ENU/Fusion-360-API/files/fusion_SketchDimensions_addOffsetDimension.htm
+
+### Sửa đầu mút trục dựng
+
+Lần Run tiếp theo đã qua offset dimensions, nhưng kiểm tra fully constrained vẫn báo lỗi. Bản trước chỉ fix đường trục; trong solver Fusion đầu mút là đối tượng riêng và có thể trượt dọc đường dù đường đã fixed. Đã fix thêm start/endSketchPoint của hai trục construction. Các điểm model vẫn giữ driving expressions; không bỏ kiểm tra fully constrained. Regression test đã thất bại trước sửa với endpoint chưa fixed, đạt sau sửa. Chờ xác nhận Run thực tế trong Fusion.

@@ -238,11 +238,13 @@ class CoordinateOffsetRegressionTest(unittest.TestCase):
         from types import SimpleNamespace as NS
         lines, offsets = [], []
         def line(a,b):
-            result=NS(a=a,b=b,isConstruction=False,isFixed=False)
+            result=NS(a=a,b=b,isConstruction=False,isFixed=False,
+                      startSketchPoint=NS(isFixed=False),endSketchPoint=NS(isFixed=False))
             lines.append(result)
             return result
         def offset(axis,point,text,isDriving=True):
             self.assertTrue(axis.isConstruction and axis.isFixed and isDriving)
+            self.assertTrue(axis.startSketchPoint.isFixed and axis.endSketchPoint.isFixed)
             dim=NS(parameter=NS(expression=''))
             offsets.append((axis,point,dim))
             return dim
