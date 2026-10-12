@@ -85,14 +85,14 @@ COMMENTS = {
 
 # Simple Fusion expressions keep geometry ownership in Change Parameters.
 DERIVED = {
-    "effective_morning_rows": ("if(show_morning; morning_periods; 0)", ""),
-    "effective_afternoon_rows": ("if(show_afternoon; afternoon_periods; 0)", ""),
+    "effective_morning_rows": ("if(show_morning == 1; morning_periods; 0)", ""),
+    "effective_afternoon_rows": ("if(show_afternoon == 1; afternoon_periods; 0)", ""),
     "period_delta": ("(effective_morning_rows + effective_afternoon_rows) - baseline_periods", ""),
     "vertical_delta": ("period_delta * row_pitch", "mm"),
     "grid_margin": ("if(day_count >= 7; 14 mm; grid_core_margin)", "mm"),
     "min_gap": ("if(day_count >= 7; 1 mm; min_column_gap)", "mm"),
-    "card_length": ("if(auto_card_length; (if(day_count >= 7; max_board_width - 2 * wave_amplitude; core_width_ref) - 2 * grid_margin - (day_count - 1) * min_gap) / day_count; fixed_card_length)", "mm"),
-    "core_width": ("max(core_width_ref; 2 * grid_margin + day_count * card_length + (day_count - 1) * min_gap; max(subtitle_block_length; slogan_block_length) + 2 * (border_edge_gap + border_width + wave_amplitude + 1 mm))", "mm"),
+    "card_length": ("if(auto_card_length == 1; (if(day_count >= 7; max_board_width - 2 * wave_amplitude; core_width_ref) - 2 * grid_margin - (day_count - 1) * min_gap) / day_count; fixed_card_length)", "mm"),
+    "core_width": ("max(core_width_ref; max(2 * grid_margin + day_count * card_length + (day_count - 1) * min_gap; max(subtitle_block_length; slogan_block_length) + 2 * (border_edge_gap + border_width + wave_amplitude + 1 mm)))", "mm"),
     "overall_width": ("core_width + 2 * wave_amplitude", "mm"),
     "body_height": ("baseline_body_h + vertical_delta", "mm"),
     "approx_overall_height": ("227 mm + vertical_delta", "mm"),
@@ -364,7 +364,11 @@ def _add_user_parameters(design, core):
         design.userParameters.add(name, value(str(number) + (" mm" if units else "")), units,
                                   COMMENTS.get(name, "Tham số nguồn SCAD."))
     for name, (expression, units) in DERIVED.items():
-        design.userParameters.add(name, value(expression), units, "Giá trị tự tính theo tham số nguồn.")
+        try:
+            design.userParameters.add(name, value(expression), units, "Giá trị tự tính theo tham số nguồn.")
+        except Exception as error:
+            raise RuntimeError("User Parameter {} = {} [{}]: {}".format(
+                name, expression, units or 'unitless', error)) from error
 
 
 def _rectangle_sketch(comp, core, x, y, width, height, name, plane=None,

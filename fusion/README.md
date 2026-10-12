@@ -91,3 +91,7 @@ python -m py_compile fusion/TimetableBoard/TimetableBoard.py
 14 test đạt: layout mặc định/7 ngày/6–4 tiết, chain expression thực, một ngày và chiều dài thẻ thủ công, tọa độ outline đổi kích thước/độ mềm sóng, miền tham số, và mock luồng Cut/Pattern. Mock kiểm tra target luôn là body kết quả mới, dung sai cân tâm và tâm hốc nam châm bảng tên. Đây không phải kiểm chứng solver hay Boolean của Autodesk.
 
 Khi Run, hộp tiến trình báo nhóm đang dựng; lỗi extrude có tên feature và lỗi tổng có stage/traceback. Document lỗi được giữ mở để xem timeline. `_check_model` yêu cầu 17 solid, sketch đủ ràng buộc, feature healthy và bounds bảng đúng; `VERIFY_VARIANTS` kiểm tra recompute rồi khôi phục tham số bằng `finally`. Chưa chạy các kiểm tra này trong Fusion ở đợt bổ sung; chưa có bằng chứng lắp/in thực.
+
+### Bản sửa sau phản hồi Fusion
+
+Fusion đã báo `Invalid expression` ở bước tạo derived parameters. Đã sửa `core_width` thành các hàm `max` lồng nhau (mỗi hàm hai đối số), đổi cờ trong `if` thành phép so sánh `== 1`, và bổ sung tên/expression/unit vào lỗi parameter. Bộ offline hiện có **16 test đạt**, gồm regression grammar và thông báo lỗi. Đây là sửa source đã kiểm thử offline; cần Run lại trong Fusion để xác nhận bước tạo parameters và các bước dựng phía sau.

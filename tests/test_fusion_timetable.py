@@ -207,5 +207,30 @@ class NativeBuilderRegressionTest(unittest.TestCase):
             with self.assertRaises(ValueError):
                 timetable.validate(dict(timetable.DEFAULTS,**changes))
 
-if __name__ == "__main__":
+
+class FusionExpressionGrammarRegressionTest(unittest.TestCase):
+    def test_derived_functions_use_fusion_arity_and_logical_conditions(self):
+        import ast
+        for name,(expression,units) in timetable.DERIVED.items():
+            tree=ast.parse(expression.replace(' mm','').replace('if(', '_if(').replace(';',','), mode='eval')
+            for node in ast.walk(tree):
+                if not isinstance(node,ast.Call):
+                    continue
+                if node.func.id in ('max','min'):
+                    self.assertEqual(len(node.args),2,(name,expression))
+                elif node.func.id=='_if':
+                    self.assertEqual(len(node.args),3,(name,expression))
+                    self.assertIsInstance(node.args[0],(ast.Compare,ast.BoolOp),(name,expression))
+
+    def test_parameter_failure_names_the_rejected_expression(self):
+        from types import SimpleNamespace as NS
+        def reject(name, expression, units, comment):
+            if name == 'core_width':
+                raise RuntimeError('3 : Invalid expression')
+        design=NS(userParameters=NS(add=reject))
+        core=NS(ValueInput=NS(createByString=str))
+        with self.assertRaisesRegex(RuntimeError,'core_width.*max\\('):
+            timetable._add_user_parameters(design,core)
+
+if __name__ == '__main__':
     unittest.main()
