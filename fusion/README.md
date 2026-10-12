@@ -51,9 +51,10 @@ biến derived. Chúng dùng biểu thức Fusion thay vì tọa độ chỉ có
   độc lập từ cùng loop tạo thành ring associative rồi Join vào body bảng. Offset
   cho phép topology thay đổi (`isTopologyMatched=False`) khi khoảng cách vượt bán
   kính cục bộ, và profile annular được chọn bằng diện tích thực.
-- Tiêu đề, thứ trong tuần và nhãn Sáng/Chiều là `SketchText` riêng, extrude
-  trực tiếp từ đối tượng text rồi Join vào bảng. Một underlay mỏng đỡ phần tiêu
-  đề nhô khỏi mép bảng.
+- Tiêu đề, thứ trong tuần và nhãn Sáng/Chiều tạo bằng `SketchText` (Arial), rồi
+  `explode` thành profile glyph và extrude `NewBody` Join vào bảng. Một underlay
+  mỏng đỡ phần tiêu đề nhô khỏi mép bảng. **`SketchText` không phải rectangle
+  sketch tự do** — xem mục “SketchText frame” bên dưới.
 - Hai plaque và 14 thẻ môn có thân sketch riêng, chữ nổi riêng và hốc nam châm
   pattern riêng. Sheet thẻ tháo rời giữ bố cục 5 cột cố định; vị trí vẫn là
   expression theo `card_length` và `subject_sheet_gap`.
@@ -63,22 +64,54 @@ biến derived. Chúng dùng biểu thức Fusion thay vì tọa độ chỉ có
   tài liệu đã chạy.
 
 Đơn giản hóa có chủ ý: biên scallop dùng cung tròn native thay vì giữ function
-curve sinusoid, chữ dùng font Fusion `Oswald`, và text metrics không tự đo để
-đổi chiều dài plaque. Các đoạn cung kề nhau giữ đúng bước và biên ngoài nhưng
-có thể tạo tiếp tuyến gãy nhẹ tại điểm nối; offset ring được kiểm tra như profile
-kín trong Fusion. Các lựa chọn này giữ sketch, text và feature có thể sửa được.
+curve sinusoid, chữ dùng font hệ thống Windows qua `FUSION_TEXT_FONTS`
+(ưu tiên `Arial`, rồi `Segoe UI` / `Times New Roman` / `Tahoma` / `Calibri`)
+thay vì Oswald của SCAD (Oswald không cài trên máy nên Fusion báo
+`invalid input font name`), và text metrics không tự đo để đổi chiều dài plaque.
+Các đoạn cung kề nhau giữ đúng bước và biên ngoài nhưng có thể tạo tiếp tuyến
+gãy nhẹ tại điểm nối; offset ring được kiểm tra như profile kín trong Fusion.
+Các lựa chọn này giữ sketch, text và feature có thể sửa được. Arial (và các
+font fallback) hỗ trợ dấu tiếng Việt trong nhãn như “Thời khóa biểu”.
 
-Ở stage nhãn bảng, backing/title/weekday/Sáng/Chiều dùng `JoinFeatureOperation`
-trực tiếp khi bảng là solid duy nhất. Với mặc định 5 ngày, cách này loại bỏ 9
-lần Combine runtime theo call graph nguồn; đây chưa phải bằng chứng timeline
-Fusion đã chạy.
+Ở stage nhãn bảng, tấm đỡ tiêu đề (Profile) vẫn `JoinFeatureOperation` trực tiếp.
+Chữ (title/weekday/Sáng/Chiều) không extrude từ `SketchText`: đối tượng text
+**không** nằm trong `sketch.profiles`. Fusion từ chối cả
+`createInput`+`setOneSideExtent(SketchText)` và `addSimple(SketchText)` với
+`3 : Some input argument is invalid` (Native title). Đường đi đúng:
+`SketchText.explode()` → profile glyph kín → `addSimple(Profiles)` `NewBody` →
+`Combine` Join vào bảng (cùng pattern plaque/thẻ). Sketch glyph đặt tên
+`* glyph sketch` và được `_check_model` miễn khóa đầy đủ.
+
+## SketchText frame (không dùng recipe rectangle)
+
+`SketchText` multiline có `heightParameter` (cỡ glyph) và `rectangleLines` (khung
+text có cấu trúc riêng). Solver Fusion đã giữ quan hệ khung; áp recipe rectangle
+thường xuyên làm dao động under/over-constraint:
+
+| Recipe đã thử trong Fusion thật | Kết quả |
+|---|---|
+| Một neo + dimension width/height | Under-constrained |
+| Drive cả 4 góc (8 offset) | `VCS_SKETCH_OVER_CONSTRAINTS` tại TR |
+| `heightParameter` + BL + H(bottom) bắt buộc + V(left) bắt buộc + BR.x + TL.y | OVER tại `addVertical(left)` — H(bottom) đã OK, V bị implied bởi khung text |
+
+Recipe hiện tại (`_add_text`):
+
+1. `heightParameter` → chiều cao glyph (expression parametric)
+2. Drive BL `(x, y)` → vị trí
+3. Thử `Horizontal(bottom)` / `Vertical(left)` **best-effort** (`try/except`, không bắt buộc)
+4. Drive `BR.x` + `TL.y` → rộng khung / cao khung `1.5 ×` glyph — không drive TR, không drive `BR.y` / `TL.x`
+5. Kiểm tra cấu trúc (4 cạnh, 4 góc, height expr) — **không** đòi `sketch.isFullyConstrained`
+
+Font: `FUSION_TEXT_FONTS` ưu tiên Arial rồi fallback Windows có dấu Việt. Mock
+offline `isFullyConstrained=True` **không** mô phỏng DOF của SketchText; regression
+đếm offset drives và bắt trường hợp `addVertical` raise OVER mà vẫn trả text.
 
 ## Kiểm tra lỗi
 
 `_check_model` gọi `computeAll`, duyệt health state của timeline, kiểm tra body
-bảng, bounds XY và yêu cầu mọi sketch native phải `isFullyConstrained`. Khi có
-lỗi, message nêu feature đầu tiên cần xem. `work/fusion-progress.md` ghi rõ
-phần đã kiểm tra offline và phần chỉ có thể xác nhận trong Fusion.
+bảng, bounds XY và yêu cầu sketch hình học native phải `isFullyConstrained`.
+Sketch chứa `SketchText` được miễn kiểm tra khóa đầy đủ (khung text editable
+thường vẫn unlocked). Khi có lỗi, message nêu feature đầu tiên cần xem.
 
 ## Giới hạn hình học và thay đổi tham số
 
@@ -98,22 +131,24 @@ python -m unittest discover -s tests -p test_fusion_timetable.py -v
 python -m py_compile fusion/TimetableBoard/TimetableBoard.py
 ```
 
-21 test đạt: layout mặc định/7 ngày/6–4 tiết, chain expression thực, một ngày và chiều dài thẻ thủ công, kế hoạch cung native, parent rectangle trước fillet, offset ring độc lập, miền tham số, và mock luồng Cut/Pattern. Mock kiểm tra target luôn là body kết quả mới, dung sai cân tâm và tâm hốc nam châm bảng tên. Đây không phải kiểm chứng solver hay Boolean của Autodesk.
+Offline unittest: layout mặc định/7 ngày/6–4 tiết, chain expression thực, một ngày và chiều dài thẻ thủ công, kế hoạch cung native, parent rectangle trước fillet, offset ring độc lập, miền tham số, mock Cut/Pattern, regression SketchText (đếm offset + nuốt OVER từ `addVertical`), và contract extrude text (`explode` → Profiles → NewBody/Combine). Mock `isFullyConstrained=True` không chứng minh DOF text. Đây không phải kiểm chứng solver hay Boolean của Autodesk.
 
 `wave_softness` đã bỏ khỏi bộ tham số Fusion vì cung tròn native không cần độ mịn tessellation. Bản mặc định thay 688 đoạn outline bằng 84 cung; đây là số entity theo kế hoạch hình học Python, chưa phải đo từ document Fusion. Bán kính bo rectangle và biên độ sóng được kiểm tra trước khi dựng để tránh hình học suy biến.
 
 Khi Run, hộp tiến trình báo nhóm đang dựng; lỗi extrude có tên feature và lỗi tổng có stage/traceback. Document lỗi được giữ mở để xem timeline. `_check_model` yêu cầu 17 solid, sketch đủ ràng buộc, feature healthy và bounds bảng đúng; `VERIFY_VARIANTS` kiểm tra recompute rồi khôi phục tham số bằng `finally`. Chưa chạy các kiểm tra này trong Fusion ở đợt bổ sung; chưa có bằng chứng lắp/in thực.
 
-### Bản sửa sau phản hồi Fusion
+### Bản sửa SketchText sau Board labels (2026-10-12)
 
-Fusion đã báo `Invalid expression` ở bước tạo derived parameters. Đã sửa `core_width` thành các hàm `max` lồng nhau (mỗi hàm hai đối số), đổi cờ trong `if` thành phép so sánh `== 1`, và bổ sung tên/expression/unit vào lỗi parameter. Bộ offline hiện có **16 test đạt**, gồm regression grammar và thông báo lỗi. Đây là sửa source đã kiểm thử offline; cần Run lại trong Fusion để xác nhận bước tạo parameters và các bước dựng phía sau.
+1. Constraint: Fusion dừng tại `Native title` với `VCS_SKETCH_OVER_CONSTRAINTS`
+   trong `addVertical`. Đã bỏ H/V bắt buộc, giữ `heightParameter` + BL + BR.x +
+   TL.y, miễn text sketch khỏi `_check_model` full-constraint.
+2. Extrude lần 1: `createInput` + `setOneSideExtent(SketchText)` → error 3.
+3. Extrude lần 2: `addSimple(SketchText, border_relief, NewBody)` → error 3.
+   Docs ghi SketchText là đối số hợp lệ, nhưng SketchText **không** phải Profile;
+   `sketch.profiles.count` vẫn 0 cho đến khi explode.
+4. Đường đi hiện tại: `_extrude_text_glyphs` — `explode()` →
+   `addSimple(ObjectCollection of Profiles)` → Combine Join. Giữ Arial + tiếng Việt
+   (outline glyph tại thời điểm explode; đổi `title_size` sau đó không cập nhật
+   lại chữ đã nổ — cần Run lại).
 
-### Bản sửa tọa độ sau lần Run tiếp theo
-
-Log thực tế xác nhận đã qua bước parameters và lỗi `VCS_SKETCH_OVER_CONSTRAINTS` khi dựng outline. Đã đổi các dimension tọa độ từ khoảng cách điểm–gốc sang `addOffsetDimension` vuông góc với hai trục dựng cố định. Chỉ trục tham chiếu là fixed/construction; các điểm hình học vẫn do driving expressions điều khiển. Áp dụng cho outline, rectangle, tâm lỗ và vị trí text; chiều rộng/cao text vẫn dùng dimension riêng. Hai vòng viền dùng chung cặp trục. **17 test offline + compile đạt**, chưa xác nhận bản sửa này bằng Fusion runtime.
-
-API: https://help.autodesk.com/cloudhelp/ENU/Fusion-360-API/files/fusion_SketchDimensions_addOffsetDimension.htm
-
-### Sửa đầu mút trục dựng
-
-Lần Run tiếp theo đã qua offset dimensions, nhưng kiểm tra fully constrained vẫn báo lỗi. Bản trước chỉ fix đường trục; trong solver Fusion đầu mút là đối tượng riêng và có thể trượt dọc đường dù đường đã fixed. Đã fix thêm start/endSketchPoint của hai trục construction. Các điểm model vẫn giữ driving expressions; không bỏ kiểm tra fully constrained. Regression test đã thất bại trước sửa với endpoint chưa fixed, đạt sau sửa. Chờ xác nhận Run thực tế trong Fusion.
+Cần **Run lại** trong Fusion qua Board labels (Native title) và wave trim.

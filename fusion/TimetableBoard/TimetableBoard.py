@@ -21,6 +21,18 @@ import traceback
 
 VERIFY_VARIANTS = False
 
+# Fusion SketchText only accepts fonts registered with Windows/Fusion.
+# The SCAD model uses Oswald from assets/fonts/, which is not a system font
+# here and raises "RuntimeError: 3 : invalid input font name". Prefer common
+# Windows fonts that include Vietnamese glyphs (ơ, ư, ế, ộ, ...).
+FUSION_TEXT_FONTS = (
+    "Arial",
+    "Segoe UI",
+    "Times New Roman",
+    "Tahoma",
+    "Calibri",
+)
+
 SUBJECT_NAMES = [
     "Tiếng Việt", "Toán", "Tiếng Anh", "Hoạt động trải nghiệm",
     "Tiếng Anh bổ trợ", "Tiếng Anh Giao tiếp", "Tự nhiên xã hội",
@@ -348,20 +360,25 @@ def _collection(core, items):
     return result
 
 
+def _drive_coordinate(sketch, core, axes, point, axis, expression):
+    """Drive one coordinate of a sketch point from a construction datum."""
+    coordinate = point.geometry.x if axis == 0 else point.geometry.y
+    if abs(coordinate) < 1e-8:
+        if axis == 0:
+            sketch.geometricConstraints.addVerticalPoints(sketch.originPoint, point)
+        else:
+            sketch.geometricConstraints.addHorizontalPoints(sketch.originPoint, point)
+        return
+    dimension = sketch.sketchDimensions.addOffsetDimension(
+        axes[axis], point, core.Point3D.create(point.geometry.x + .03,
+                                               point.geometry.y + .03, 0), True)
+    dimension.parameter.expression = "abs(" + expression + ")"
+
+
 def _drive_point(sketch, core, axes, point, x_expression, y_expression):
     """Drive one sketch point from the shared construction datums."""
-    for axis, expression in enumerate((x_expression, y_expression)):
-        coordinate = point.geometry.x if axis == 0 else point.geometry.y
-        if abs(coordinate) < 1e-8:
-            if axis == 0:
-                sketch.geometricConstraints.addVerticalPoints(sketch.originPoint, point)
-            else:
-                sketch.geometricConstraints.addHorizontalPoints(sketch.originPoint, point)
-        else:
-            dimension = sketch.sketchDimensions.addOffsetDimension(
-                axes[axis], point, core.Point3D.create(point.geometry.x + .03,
-                                                       point.geometry.y + .03, 0), True)
-            dimension.parameter.expression = "abs(" + expression + ")"
+    _drive_coordinate(sketch, core, axes, point, 0, x_expression)
+    _drive_coordinate(sketch, core, axes, point, 1, y_expression)
 
 
 def _add_analytic_loop(sketch, core, fusion, p):
@@ -408,10 +425,13 @@ def _anchored_rectangle_sketch(comp, core, fusion, x, y, width, height, name,
                                width_expression=None, height_expression=None):
     """Create a parent rectangle, then fillet it without changing its bbox.
 
-    The position and full extents belong to the native four-line rectangle.
-    Fillet trims the straight segments, so dimensions must not be attached to
-    those shortened tangent segments.  Keeping the parent dimensions also
-    makes the x/y anchor independent of which corner Fusion trims first.
+    Drive every parent corner from the fixed construction axes.  One-anchor plus
+    width/height (or diagonal) dims assumes addTwoPointRectangle installs H/V
+    edge constraints; through the Fusion API those are unreliable and leave
+    shear DOF.  Fillet still trims only the independent model-copy lines, so
+    parent corners stay out of the fillet and the outer bbox remains stable.
+
+    `fusion` is kept for call-site compatibility with other sketch helpers.
     """
     sketch = comp.sketches.add(plane or comp.xYConstructionPlane)
     sketch.name = name
@@ -420,75 +440,52 @@ def _anchored_rectangle_sketch(comp, core, fusion, x, y, width, height, name,
     y_expression = y_expression or "{} mm".format(y)
     width_expression = width_expression or "{} mm".format(width)
     height_expression = height_expression or "{} mm".format(height)
-    parent_lower_left = sketch.sketchPoints.add(point(x / 10, y / 10, 0))
-    parent_upper_right = sketch.sketchPoints.add(
-        point((x + width) / 10, (y + height) / 10, 0))
-    parent_rectangle = sketch.sketchCurves.sketchLines.addTwoPointRectangle(
-        parent_lower_left, parent_upper_right)
-    if parent_rectangle is None:
-        raise RuntimeError("Không tạo được parent rectangle: " + name)
-    parent_lines = [parent_rectangle.item(i) for i in range(parent_rectangle.count)]
-    for line in parent_lines:
-        line.isConstruction = True
+    x_right = "({}) + ({})".format(x_expression, width_expression)
+    y_top = "({}) + ({})".format(y_expression, height_expression)
     axes = _coordinate_axes(sketch, core)
-    # These are the four dimensions of the construction parent.  Its sharp
-    # corners are never passed to addFillet, so the outer bbox remains stable
-    # when the independent model-copy lines are trimmed.
-    _drive_point(sketch, core, axes, parent_lower_left, x_expression, y_expression)
-    horizontal_dimension = sketch.sketchDimensions.addDistanceDimension(
-        parent_lower_left, parent_upper_right,
-        fusion.DimensionOrientations.HorizontalDimensionOrientation,
-        point(parent_upper_right.geometry.x + .03,
-              parent_upper_right.geometry.y + .03, 0))
-    horizontal_dimension.parameter.expression = "abs({})".format(width_expression)
-    vertical_dimension = sketch.sketchDimensions.addDistanceDimension(
-        parent_lower_left, parent_upper_right,
-        fusion.DimensionOrientations.VerticalDimensionOrientation,
-        point(parent_upper_right.geometry.x + .03,
-              parent_upper_right.geometry.y + .03, 0))
-    vertical_dimension.parameter.expression = "abs({})".format(height_expression)
+    # Four corners, CCW from lower-left: each gets its own axis offsets so the
+    # parent cannot shear even when API edge H/V constraints are missing.
+    parent_corners = (
+        (x / 10, y / 10, x_expression, y_expression),
+        ((x + width) / 10, y / 10, x_right, y_expression),
+        ((x + width) / 10, (y + height) / 10, x_right, y_top),
+        (x / 10, (y + height) / 10, x_expression, y_top),
+    )
+    parent_points = []
+    for px, py, x_expr, y_expr in parent_corners:
+        corner = sketch.sketchPoints.add(point(px, py, 0))
+        _drive_point(sketch, core, axes, corner, x_expr, y_expr)
+        parent_points.append(corner)
+    parent_lines = []
+    for index in range(4):
+        line = sketch.sketchCurves.sketchLines.addByTwoPoints(
+            parent_points[index], parent_points[(index + 1) % 4])
+        if line is None:
+            raise RuntimeError("Không tạo được parent rectangle: " + name)
+        line.isConstruction = True
+        parent_lines.append(line)
 
-    # The visible rectangle deliberately uses independent Point3D endpoints;
-    # no model endpoint is coincident with a parent corner.  Collinear support
-    # constraints make all four sides follow the driven parent without making
-    # the parent corners part of the fillet operation.
-    model_lines = [
-        sketch.sketchCurves.sketchLines.addByTwoPoints(
-            point(x / 10, y / 10, 0), point((x + width) / 10, y / 10, 0)),
-        sketch.sketchCurves.sketchLines.addByTwoPoints(
-            point((x + width) / 10, y / 10, 0),
-            point((x + width) / 10, (y + height) / 10, 0)),
-        sketch.sketchCurves.sketchLines.addByTwoPoints(
-            point((x + width) / 10, (y + height) / 10, 0),
-            point(x / 10, (y + height) / 10, 0)),
-        sketch.sketchCurves.sketchLines.addByTwoPoints(
-            point(x / 10, (y + height) / 10, 0), point(x / 10, y / 10, 0)),
-    ]
-    if any(line is None for line in model_lines):
-        raise RuntimeError("Không tạo được model rectangle: " + name)
-    for model_line in model_lines:
-        dx = abs(model_line.startSketchPoint.geometry.x -
-                 model_line.endSketchPoint.geometry.x)
-        dy = abs(model_line.startSketchPoint.geometry.y -
-                 model_line.endSketchPoint.geometry.y)
-        if dx > dy:
-            parent_line = min(parent_lines, key=lambda candidate: abs(
-                ((candidate.startSketchPoint.geometry.y + candidate.endSketchPoint.geometry.y) / 2) -
-                ((model_line.startSketchPoint.geometry.y + model_line.endSketchPoint.geometry.y) / 2)))
-        else:
-            parent_line = min(parent_lines, key=lambda candidate: abs(
-                ((candidate.startSketchPoint.geometry.x + candidate.endSketchPoint.geometry.x) / 2) -
-                ((model_line.startSketchPoint.geometry.x + model_line.endSketchPoint.geometry.x) / 2)))
+    # Independent model endpoints: collinear to the driven parent, then fillet.
+    # Parent corners are never passed to addFillet.
+    model_lines = []
+    for index, parent_line in enumerate(parent_lines):
+        start = parent_points[index].geometry
+        end = parent_points[(index + 1) % 4].geometry
+        model_line = sketch.sketchCurves.sketchLines.addByTwoPoints(
+            point(start.x, start.y, 0), point(end.x, end.y, 0))
+        if model_line is None:
+            raise RuntimeError("Không tạo được model rectangle: " + name)
         sketch.geometricConstraints.addCollinear(model_line, parent_line)
+        model_lines.append(model_line)
     for index, model_line in enumerate(model_lines):
         sketch.geometricConstraints.addCoincident(
             model_line.endSketchPoint,
-            model_lines[(index + 1) % len(model_lines)].startSketchPoint)
+            model_lines[(index + 1) % 4].startSketchPoint)
 
     # Process corners in the line flow order so each subsequent fillet uses
     # the opposite, still-untrimmed endpoint of its shared line.
     for index, line_a in enumerate(model_lines):
-        line_b = model_lines[(index + 1) % len(model_lines)]
+        line_b = model_lines[(index + 1) % 4]
         point_a = line_a.endSketchPoint.geometry
         point_b = line_b.startSketchPoint.geometry
         arc = sketch.sketchCurves.sketchArcs.addFillet(
@@ -571,58 +568,146 @@ def _coordinate_axes(sketch, core):
     return axes
 
 
+def _text_frame_corners(result, text):
+    """Return BL/BR/TL/TR and edges from SketchText rectangleLines."""
+    lines = result.definition.rectangleLines
+    if not lines or len(lines) != 4:
+        raise RuntimeError('Text has no native rectangular boundary: ' + text)
+    unique = {}
+    for line in lines:
+        for pt in (line.startSketchPoint, line.endSketchPoint):
+            unique[(round(pt.geometry.x, 8), round(pt.geometry.y, 8))] = pt
+    if len(unique) != 4:
+        raise RuntimeError('Text boundary is not a four-corner rectangle: ' + text)
+    xmin = min(x for x, y in unique)
+    xmax = max(x for x, y in unique)
+    ymin = min(y for x, y in unique)
+    ymax = max(y for x, y in unique)
+    bl = unique[(xmin, ymin)]
+    br = unique[(xmax, ymin)]
+    tl = unique[(xmin, ymax)]
+    tr = unique[(xmax, ymax)]
+
+    def edge_on(coord_index, value):
+        for line in lines:
+            a = line.startSketchPoint.geometry
+            b = line.endSketchPoint.geometry
+            ca = a.x if coord_index == 0 else a.y
+            cb = b.x if coord_index == 0 else b.y
+            if abs(ca - value) < 1e-6 and abs(cb - value) < 1e-6:
+                return line
+        raise RuntimeError('Text boundary edge missing for: ' + text)
+
+    return {
+        'lines': lines,
+        'bl': bl, 'br': br, 'tl': tl, 'tr': tr,
+        'bottom': edge_on(1, ymin),
+        'left': edge_on(0, xmin),
+        'top': edge_on(1, ymax),
+        'right': edge_on(0, xmax),
+    }
+
+
+def _try_orientation(sketch, fusion, line, horizontal):
+    """Best-effort H/V on a SketchText frame edge.
+
+    Real Fusion: Horizontal(bottom) often succeeds; Vertical(left) then raises
+    VCS_SKETCH_OVER_CONSTRAINTS because the text frame already implies
+    orientation. Never treat either as required.
+    """
+    constraint_type = (fusion.HorizontalConstraint if horizontal
+                       else fusion.VerticalConstraint)
+    try:
+        existing = list(line.geometricConstraints)
+    except Exception:
+        existing = []
+    if any(isinstance(c, constraint_type) for c in existing):
+        return False
+    try:
+        if horizontal:
+            sketch.geometricConstraints.addHorizontal(line)
+        else:
+            sketch.geometricConstraints.addVertical(line)
+        return True
+    except Exception:
+        return False
+
+
 def _add_text(sketch, core, text, height_mm, x_mm, y_mm, width_mm,
               height_expression=None, x_expression=None, y_expression=None,
               width_expression=None):
-    """Add a native SketchTexts text block (Fusion 2026 createInput3 API)."""
+    """Add a native SketchTexts text block (Fusion 2026 createInput3 API).
+
+    SketchText is not a free construction rectangle. Fusion owns glyph height
+    via heightParameter and keeps rectangleLines as a structured text frame.
+    Rectangle recipes oscillate in real Fusion:
+
+      - one-anchor + width/height distance dims → under-constrained
+      - drive all 4 corners (8 offsets) → VCS_SKETCH_OVER_CONSTRAINTS at TR
+      - BL + required H + required V + BR.x + TL.y → OVER at addVertical(left)
+        after Horizontal(bottom) already succeeded (V implied by text frame)
+
+    Fusion-safe recipe:
+      1. heightParameter → glyph height (parametric)
+      2. drive BL (x, y) → position
+      3. try H(bottom) / V(left) best-effort only — never required
+      4. drive BR.x + TL.y → frame width / 1.5× height pad
+      5. never drive TR; never drive BR.y or TL.x
+      6. validate structure only — do NOT require full sketch lock
+         (editable SketchText often stays unlocked in the browser)
+    """
     import adsk.fusion as fusion
     texts = sketch.sketchTexts  # SketchTexts API collection
-    inp = texts.createInput3("'{}'".format(text.replace("'", "''")),
-                             _value(core, "{} mm".format(height_mm)))
-    inp.setAsMultiLine(core.Point3D.create(x_mm / 10, y_mm / 10, 0),
-                       core.Point3D.create((x_mm + width_mm) / 10,
-                                           (y_mm + height_mm * 1.5) / 10, 0),
-                       core.HorizontalAlignments.CenterHorizontalAlignment,
-                       core.VerticalAlignments.MiddleVerticalAlignment, 0)
-    inp.fontName = "Oswald"
-    result = texts.add(inp)
-    result.heightParameter.expression = height_expression or "{} mm".format(height_mm)
-    lines=result.definition.rectangleLines
-    if not lines or len(lines)!=4:
-        raise RuntimeError('Text has no native rectangular boundary: '+text)
-    unique={}
-    for line in lines:
-        for pt in (line.startSketchPoint,line.endSketchPoint):
-            unique[(round(pt.geometry.x,8),round(pt.geometry.y,8))]=pt
-    if len(unique)!=4:
-        raise RuntimeError('Text boundary is not a four-corner rectangle: '+text)
-    xmin=min(x for x,y in unique); xmax=max(x for x,y in unique)
-    ymin=min(y for x,y in unique); ymax=max(y for x,y in unique)
-    bl,br,tl=(unique[(xmin,ymin)],unique[(xmax,ymin)],unique[(xmin,ymax)])
-    bottom=next(line for line in lines if abs(line.startSketchPoint.geometry.y-ymin)<1e-6
-                and abs(line.endSketchPoint.geometry.y-ymin)<1e-6)
-    if not any(isinstance(c,fusion.HorizontalConstraint) for c in bottom.geometricConstraints):
-        sketch.geometricConstraints.addHorizontal(bottom)
-    orientations=(fusion.DimensionOrientations.HorizontalDimensionOrientation,
-                  fusion.DimensionOrientations.VerticalDimensionOrientation)
-    axes=_coordinate_axes(sketch,core)
-    def drive(a,b,axis,expr):
-        dim=sketch.sketchDimensions.addDistanceDimension(a,b,orientations[axis],
-            core.Point3D.create(b.geometry.x+.03,b.geometry.y+.03,0))
-        dim.parameter.expression='abs('+expr+')'
-    drive(bl,br,0,width_expression or str(width_mm)+' mm')
-    drive(bl,tl,1,'('+ (height_expression or str(height_mm)+' mm') +') * 1.5')
-    for axis,expr in enumerate((x_expression or str(x_mm)+' mm',y_expression or str(y_mm)+' mm')):
-        coord=bl.geometry.x if axis==0 else bl.geometry.y
-        if abs(coord)<1e-8:
-            if axis==0: sketch.geometricConstraints.addVerticalPoints(sketch.originPoint,bl)
-            else: sketch.geometricConstraints.addHorizontalPoints(sketch.originPoint,bl)
-        else:
-            dim=sketch.sketchDimensions.addOffsetDimension(axes[axis],bl,
-                core.Point3D.create(bl.geometry.x+.03,bl.geometry.y+.03,0),True)
-            dim.parameter.expression='abs('+expr+')'
-    if not sketch.isFullyConstrained:
-        raise RuntimeError('Text sketch chưa đủ ràng buộc: '+text)
+    quoted = "'{}'".format(text.replace("'", "''"))
+    height_value = _value(core, "{} mm".format(height_mm))
+    corner_a = core.Point3D.create(x_mm / 10, y_mm / 10, 0)
+    corner_b = core.Point3D.create((x_mm + width_mm) / 10,
+                                   (y_mm + height_mm * 1.5) / 10, 0)
+    # Recreate the input on each attempt: a rejected fontName fails on add().
+    last_error = None
+    result = None
+    for font_name in FUSION_TEXT_FONTS:
+        inp = texts.createInput3(quoted, height_value)
+        inp.setAsMultiLine(
+            corner_a, corner_b,
+            core.HorizontalAlignments.CenterHorizontalAlignment,
+            core.VerticalAlignments.MiddleVerticalAlignment, 0)
+        inp.fontName = font_name
+        try:
+            result = texts.add(inp)
+            break
+        except Exception as err:
+            last_error = err
+    if result is None:
+        raise RuntimeError(
+            "Fusion rejected all text fonts {}; last error: {}".format(
+                FUSION_TEXT_FONTS, last_error))
+    height_expr = height_expression or "{} mm".format(height_mm)
+    width_expr = width_expression or "{} mm".format(width_mm)
+    x_expr = x_expression or "{} mm".format(x_mm)
+    y_expr = y_expression or "{} mm".format(y_mm)
+    result.heightParameter.expression = height_expr
+
+    frame = _text_frame_corners(result, text)
+    # Box height is 1.5× glyph height so multiline padding stays parametric.
+    x_right = "({}) + ({})".format(x_expr, width_expr)
+    y_top = "({}) + (({}) * 1.5)".format(y_expr, height_expr)
+    axes = _coordinate_axes(sketch, core)
+
+    # Position, optional orientation, then the two free size axes only.
+    _drive_point(sketch, core, axes, frame['bl'], x_expr, y_expr)
+    _try_orientation(sketch, fusion, frame['bottom'], True)
+    _try_orientation(sketch, fusion, frame['left'], False)
+    _drive_coordinate(sketch, core, axes, frame['br'], 0, x_right)
+    _drive_coordinate(sketch, core, axes, frame['tl'], 1, y_top)
+    _try_orientation(sketch, fusion, frame['top'], True)
+    _try_orientation(sketch, fusion, frame['right'], False)
+
+    # Structural contract only — SketchText DOF is not a free rectangle.
+    if not result.heightParameter.expression:
+        raise RuntimeError('Text heightParameter missing: ' + text)
+    if len(frame['lines']) != 4:
+        raise RuntimeError('Text frame lost rectangleLines: ' + text)
     return result
 
 
@@ -644,17 +729,68 @@ def _extrude(comp, fusion, core, sketch, operation, distance, name, target=None)
 
 
 def _extrude_entity(comp, fusion, core, entity, operation, distance, name, target=None):
-    """Extrude one profile or SketchText without flattening text into a base profile."""
-    inp = comp.features.extrudeFeatures.createInput(entity, operation)
-    inp.setOneSideExtent(fusion.DistanceExtentDefinition.create(_value(core, distance)),
-                         fusion.ExtentDirections.PositiveExtentDirection)
-    if target is not None:
-        inp.participantBodies = [target]
+    """Extrude a Profile or ObjectCollection of Profiles (not SketchText).
+
+    SketchText is a separate sketch entity: it does not appear in
+    sketch.profiles, and Fusion rejects both createInput+setOneSideExtent and
+    addSimple(SketchText) with "Some input argument is invalid" on our
+    createInput3 multiline board labels. Use _extrude_text_glyphs for text.
+    """
+    distance_value = _value(core, distance)
     try:
-        feature = comp.features.extrudeFeatures.add(inp)
+        if target is None:
+            feature = comp.features.extrudeFeatures.addSimple(
+                entity, distance_value, operation)
+        else:
+            inp = comp.features.extrudeFeatures.createInput(entity, operation)
+            inp.setOneSideExtent(
+                fusion.DistanceExtentDefinition.create(distance_value),
+                fusion.ExtentDirections.PositiveExtentDirection)
+            inp.participantBodies = [target]
+            feature = comp.features.extrudeFeatures.add(inp)
     except Exception as error:
         raise RuntimeError('Extrude failed: '+name) from error
     feature.name = name
+    return feature
+
+
+def _extrude_text_glyphs(comp, fusion, core, text, sketch, operation, distance,
+                         name, target=None):
+    """Raise lettering by exploding SketchText into closed glyph Profiles.
+
+    Exact reason addSimple(SketchText) fails here: SketchText is not a Profile.
+    Docs list SketchText as a legal addSimple/createInput argument, but real
+    Fusion still returns error 3 for createInput3 multiline text after frame
+    drives. Forum workaround that matches Profile extrudes (scallop ring):
+
+      1. nudge text into a finished compute state
+      2. text.explode() → glyph curves (deletes SketchText)
+      3. sketch.profiles now holds closed glyph loops
+      4. addSimple / createInput those Profiles
+
+    Keeps Vietnamese + Arial outlines baked at explode time. Glyph sketches
+    are named "* glyph sketch" so _check_model can exempt them (no SketchText
+    left, and explode curves are not fully constrained).
+    """
+    # API quirk: unfinished SketchText can explode to zero curves until touched.
+    try:
+        text.isHorizontalFlip = text.isHorizontalFlip
+    except Exception:
+        pass
+    curves = text.explode()
+    if not curves:
+        raise RuntimeError(
+            '{}: SketchText.explode produced no curves (font/glyphs?).'.format(
+                name))
+    if sketch.profiles.count == 0:
+        raise RuntimeError(
+            '{}: no closed glyph profiles after explode.'.format(name))
+    profiles = _collection(
+        core, [sketch.profiles.item(i) for i in range(sketch.profiles.count)])
+    sketch.name = name + ' glyph sketch'
+    feature = _extrude_entity(
+        comp, fusion, core, profiles, operation, distance, name, target)
+    sketch.isVisible = False
     return feature
 
 
@@ -667,10 +803,43 @@ def _join_body(comp, fusion, core, target, tools, name):
     return result.bodies.item(0)
 
 
+def _cut_body(comp, fusion, core, target, tools, name):
+    """Subtract tool bodies from target; tools are consumed."""
+    inp = comp.features.combineFeatures.createInput(target, _collection(core, tools))
+    inp.operation = fusion.FeatureOperations.CutFeatureOperation
+    inp.isKeepToolBodies = False
+    result = comp.features.combineFeatures.add(inp)
+    result.name = name
+    return result.bodies.item(0)
+
+
+def _bodies_of(feature):
+    return [feature.bodies.item(index) for index in range(feature.bodies.count)]
+
+
 def _pattern_feature(comp, fusion, core, feature, axis, quantity, distance, name,
                      second_axis=None, second_quantity=None, second_distance=None):
     patterns = comp.features.rectangularPatternFeatures
     inp = patterns.createInput(_collection(core, [feature]), axis,
+                               _value(core, quantity), _value(core, distance),
+                               fusion.PatternDistanceType.SpacingPatternDistanceType)
+    if second_axis is not None:
+        inp.setDirectionTwo(second_axis, _value(core, second_quantity),
+                            _value(core, second_distance))
+    # Identical: copy pocket Cut features as-is. Optimized/Adjust can fail with
+    # PATTERN_FEATURES_NO_PASTE_INT_EDGES when paste edges are missing.
+    # Blind magnet Cuts still fail even with Identical — use _pattern_bodies.
+    inp.patternComputeOption = fusion.PatternComputeOptions.IdenticalPatternCompute
+    result = patterns.add(inp)
+    result.name = name
+    return result
+
+
+def _pattern_bodies(comp, fusion, core, bodies, axis, quantity, distance, name,
+                    second_axis=None, second_quantity=None, second_distance=None):
+    """Pattern solid bodies. Skips feature paste/intersect (magnet Cut path)."""
+    patterns = comp.features.rectangularPatternFeatures
+    inp = patterns.createInput(_collection(core, bodies), axis,
                                _value(core, quantity), _value(core, distance),
                                fusion.PatternDistanceType.SpacingPatternDistanceType)
     if second_axis is not None:
@@ -768,16 +937,23 @@ def _build_board(design, fusion, core, p, layout_result):
         seed = _anchored_circle_sketch(comp, core, fusion, x+w/2, y+h/2,
             p["magnet_hole_d"], name+" magnet seed", magnet_plane, first,
             "({}) + ({}) / 2".format(y_expression,h_expression), "magnet_hole_d")
-        cut = _extrude(comp, fusion, core, seed, fusion.FeatureOperations.CutFeatureOperation,
-            "magnet_hole_depth", name+" magnet seed cut", board)
-        board = cut.bodies.item(0)
-        pattern = _pattern_feature(comp, fusion, core, cut, comp.xConstructionAxis,
+        # NewBody tool + body pattern + combine-cut: patterning Cut features of
+        # these blind magnet holes fails with PATTERN_FEATURES_NO_PASTE_INT_EDGES
+        # even when IdenticalPatternCompute is set (R-Pattern on plaque X count).
+        tool = _extrude(comp, fusion, core, seed,
+                        fusion.FeatureOperations.NewBodyFeatureOperation,
+                        "magnet_hole_depth", name+" magnet seed tool")
+        pattern = _pattern_bodies(
+            comp, fusion, core, _bodies_of(tool), comp.xConstructionAxis,
             "floor(({} - 2 * magnet_end_inset) / magnet_center_pitch) + 1".format(w_expression),
             "magnet_center_pitch", name+" magnet recesses")
-        board = pattern.bodies.item(0)
+        board = _cut_body(comp, fusion, core, board, _bodies_of(pattern),
+                          name+" magnet cut")
         board.name = "Timetable board"
 
     def magnet_pattern(y, rows, y_expression, name):
+        # NewBody seed → pattern magnets along X → 2D days×rows of those bodies
+        # → one combine-cut. Avoids Cut-feature paste edges on pocket floors.
         nonlocal board
         count = layout_result["magnet_count"]
         first = (layout_result["card_length"] - (count - 1) * p["magnet_center_pitch"]) / 2
@@ -787,19 +963,23 @@ def _build_board(design, fusion, core, p, layout_result):
                                        p["magnet_hole_d"], name + " seed", magnet_plane,
                                        x_expression, "{} + card_width / 2".format(y_expression),
                                        "magnet_hole_d")
-        cut = _extrude(comp, fusion, core, seed, fusion.FeatureOperations.CutFeatureOperation,
-                       "magnet_hole_depth + slot_depth", name + " seed cut", board)
-        board = cut.bodies.item(0)
-        magnet = _pattern_feature(comp, fusion, core, cut, comp.xConstructionAxis,
-                                  "magnet_count", "magnet_center_pitch", name + " magnets")
-        rows_feature = _pattern_feature(comp, fusion, core, magnet, comp.yConstructionAxis,
-                                        "effective_{}_rows".format("afternoon" if y_expression == "afternoon_y" else "morning"),
-                                        "row_pitch", name + " rows")
-        pattern = _pattern_feature(comp, fusion, core, rows_feature, comp.xConstructionAxis,
-                                "day_count", "card_length + column_gap", name + " days")
-        board = pattern.bodies.item(0)
+        tool = _extrude(comp, fusion, core, seed,
+                        fusion.FeatureOperations.NewBodyFeatureOperation,
+                        "magnet_hole_depth + slot_depth", name + " seed tool")
+        magnets = _pattern_bodies(comp, fusion, core, _bodies_of(tool),
+                                  comp.xConstructionAxis, "magnet_count",
+                                  "magnet_center_pitch", name + " magnets")
+        grid = _pattern_bodies(
+            comp, fusion, core, _bodies_of(magnets), comp.xConstructionAxis,
+            "day_count", "card_length + column_gap", name + " days",
+            comp.yConstructionAxis,
+            "effective_{}_rows".format(
+                "afternoon" if y_expression == "afternoon_y" else "morning"),
+            "row_pitch")
+        board = _cut_body(comp, fusion, core, board, _bodies_of(grid),
+                          name + " cut")
         board.name = "Timetable board"
-        return pattern
+        return grid
 
     if layout_result["afternoon_rows"]:
         magnet_pattern(layout_result["afternoon_y"], layout_result["afternoon_rows"],
@@ -879,12 +1059,13 @@ def _build_board_labels_native(design, fusion, core, p, layout_result, board):
         text = _add_text(sketch, core, label, height, x, y, text_width,
                          x_expression=x_expr, y_expression=y_expr,
                          width_expression=width_expr, height_expression="title_size" if name=="Native title" else "6 mm")
-        feature = _extrude_entity(comp, fusion, core, text,
-                                  fusion.FeatureOperations.JoinFeatureOperation,
-                                  "border_relief", name)
-        # The text plane is 0.01 mm inside the board top, so each glyph
-        # intersects this sole target body and Fusion can join it directly.
-        board = feature.bodies.item(0)
+        # SketchText is not a Profile — explode glyphs, NewBody, Combine Join.
+        feature = _extrude_text_glyphs(
+            comp, fusion, core, text, sketch,
+            fusion.FeatureOperations.NewBodyFeatureOperation,
+            "border_relief", name)
+        board = _join_body(comp, fusion, core, board, list(feature.bodies),
+                           "Join " + name)
 
     text_join("Thời khóa biểu", p["title_size"], width / 2 - 60,
               layout_result["title_y"] - 9, 120, "Native title",
@@ -936,9 +1117,10 @@ def _build_plaque_native(design, fusion, core, p, label, width, height, x, y,
                      x_expression="(overall_width - {}) / 2 + 1 mm".format(width_expression),
                      y_expression="{} + ({} - {} mm * 1.5) / 2".format(y_expression,height_expression,min(height*.55,8)),
                      width_expression="{} - 2 mm".format(width_expression))
-    raised = _extrude_entity(comp, fusion, core, text,
-                             fusion.FeatureOperations.NewBodyFeatureOperation,
-                             "title_relief", name + " native raised text")
+    raised = _extrude_text_glyphs(
+        comp, fusion, core, text, text_sketch,
+        fusion.FeatureOperations.NewBodyFeatureOperation,
+        "title_relief", name + " native raised text")
     body = _join_body(comp, fusion, core, body, list(raised.bodies), name + " native text join")
     first = "(overall_width - {}) / 2 + ({} - (floor(({} - 2 * magnet_end_inset) / magnet_center_pitch)) * magnet_center_pitch) / 2".format(
         width_expression, width_expression, width_expression)
@@ -946,12 +1128,15 @@ def _build_plaque_native(design, fusion, core, p, label, width, height, x, y,
         comp, core, fusion, x + width / 2, y + height / 2,
         p["magnet_hole_d"], name + " native magnet seed", comp.xYConstructionPlane,
         first, "{} + {} / 2".format(y_expression, height_expression), "magnet_hole_d")
-    cut = _extrude(comp, fusion, core, seed, fusion.FeatureOperations.CutFeatureOperation,
-                   "magnet_hole_depth", name + " native magnet seed cut", body)
-    pattern = _pattern_feature(comp, fusion, core, cut, comp.xConstructionAxis,
-                     "floor(({} - 2 * magnet_end_inset) / magnet_center_pitch) + 1".format(width_expression),
-                     "magnet_center_pitch", name + " native magnet recesses")
-    result = pattern.bodies.item(0)
+    tool = _extrude(comp, fusion, core, seed,
+                    fusion.FeatureOperations.NewBodyFeatureOperation,
+                    "magnet_hole_depth", name + " native magnet seed tool")
+    pattern = _pattern_bodies(
+        comp, fusion, core, _bodies_of(tool), comp.xConstructionAxis,
+        "floor(({} - 2 * magnet_end_inset) / magnet_center_pitch) + 1".format(width_expression),
+        "magnet_center_pitch", name + " native magnet recesses")
+    result = _cut_body(comp, fusion, core, body, _bodies_of(pattern),
+                       name + " native magnet cut")
     result.name = body.name
     return result
 
@@ -981,9 +1166,11 @@ def _build_subject_card_native(design, fusion, core, p, label, index, x, y, leng
                      x_expression="({}) + 1 mm".format(x_expression),
                      y_expression="({}) + 2 mm".format(y_expression),
                      width_expression="card_length - 2 mm")
-    raised = _extrude_entity(comp, fusion, core, text,
-                             fusion.FeatureOperations.NewBodyFeatureOperation,
-                             "subject_text_relief", "Subject {:02d} native raised text".format(index + 1))
+    raised = _extrude_text_glyphs(
+        comp, fusion, core, text, text_sketch,
+        fusion.FeatureOperations.NewBodyFeatureOperation,
+        "subject_text_relief",
+        "Subject {:02d} native raised text".format(index + 1))
     body = _join_body(comp, fusion, core, body, list(raised.bodies),
                "Join subject {:02d} native text".format(index + 1))
     seed = _anchored_circle_sketch(
@@ -992,12 +1179,16 @@ def _build_subject_card_native(design, fusion, core, p, label, index, x, y, leng
         comp.xYConstructionPlane,
         "({}) + (card_length - (magnet_count - 1) * magnet_center_pitch) / 2".format(x_expression),
         "({}) + card_width / 2".format(y_expression), "magnet_hole_d")
-    cut = _extrude(comp, fusion, core, seed, fusion.FeatureOperations.CutFeatureOperation,
-                   "magnet_hole_depth", "Subject {:02d} native magnet seed cut".format(index + 1), body)
-    pattern = _pattern_feature(comp, fusion, core, cut, comp.xConstructionAxis,
-                     "magnet_count", "magnet_center_pitch",
-                     "Subject {:02d} native magnet recesses".format(index + 1))
-    result = pattern.bodies.item(0)
+    tool = _extrude(comp, fusion, core, seed,
+                    fusion.FeatureOperations.NewBodyFeatureOperation,
+                    "magnet_hole_depth",
+                    "Subject {:02d} native magnet seed tool".format(index + 1))
+    pattern = _pattern_bodies(
+        comp, fusion, core, _bodies_of(tool), comp.xConstructionAxis,
+        "magnet_count", "magnet_center_pitch",
+        "Subject {:02d} native magnet recesses".format(index + 1))
+    result = _cut_body(comp, fusion, core, body, _bodies_of(pattern),
+                       "Subject {:02d} native magnet cut".format(index + 1))
     result.name = body.name
     return result
 
@@ -1040,7 +1231,19 @@ def _check_model(design, expected):
     if abs(actual[0] - expected["overall_width"]) > 0.5 or abs(actual[1] - expected["approx_overall_height"]) > 0.5:
         raise RuntimeError("Main board bounds {} do not follow parameters {}.".format(actual, expected))
     sketches = list(design.rootComponent.sketches)
-    unconstrained = [sketch.name for sketch in sketches if not sketch.isFullyConstrained]
+    # Text sketches stay unlocked: either live SketchText frames, or exploded
+    # glyph curves ("* glyph sketch") that are not fully constrained.
+    unconstrained = []
+    for sketch in sketches:
+        if sketch.isFullyConstrained:
+            continue
+        try:
+            has_text = sketch.sketchTexts.count > 0
+        except Exception:
+            has_text = False
+        is_glyph = sketch.name.endswith(' glyph sketch')
+        if not has_text and not is_glyph:
+            unconstrained.append(sketch.name)
     if unconstrained:
         raise RuntimeError("Unconstrained native sketches: {}".format(", ".join(unconstrained[:8])))
     if len(sketches) < 17:
