@@ -1,0 +1,9 @@
+{
+  "autodeskProduct": "Fusion",
+  "type": "script",
+  "author": "",
+  "description": {"": "Native parametric Vietnamese timetable board with detached plaques and subject cards."},
+  "version": "1.0.0",
+  "supportedOS": "windows|mac",
+  "editEnabled": true
+}

@@ -16,3 +16,6 @@ work/
 *.key
 *.pfx
 *private*.json
+
+# Python offline test cache
+__pycache__/
