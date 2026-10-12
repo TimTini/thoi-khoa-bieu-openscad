@@ -51,3 +51,7 @@ Giấy phép OFL trong `assets/fonts/` áp dụng cho các font tương ứng. D
 ## Autodesk Fusion
 
 Bộ [script Fusion native parametric](fusion/README.md) tạo document mới gồm bảng, hai bảng tên và 14 thẻ môn. Xem hướng dẫn chạy, tham số, kiểm thử và giới hạn trong tài liệu đó.
+
+## Bộ tài liệu agent tự học.
+
+[Cẩm nang dùng chung](https://github.com/TimTini/snaplock-storage-box/blob/main/docs/agent-learning.md) tổng hợp quy trình SCAD trước rồi Fusion Python sau. [Sổ lỗi và cách sửa](https://github.com/TimTini/snaplock-storage-box/blob/main/docs/error-cookbook.md) ghi các ca kỹ thuật cùng phạm vi kiểm chứng. [Mẫu giao việc](https://github.com/TimTini/snaplock-storage-box/blob/main/docs/scad-to-fusion-task.md) áp dụng quy trình cho model mới.
