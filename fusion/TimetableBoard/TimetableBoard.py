@@ -310,8 +310,7 @@ def _anchored_rectangle_sketch(comp, core, fusion, x, y, width, height, name,
     y_values = (y_expression, y_expression,
                 "({}) + ({})".format(y_expression, height_expression),
                 "({}) + ({})".format(y_expression, height_expression))
-    orientations = (fusion.DimensionOrientations.HorizontalDimensionOrientation,
-                    fusion.DimensionOrientations.VerticalDimensionOrientation)
+    axes = _coordinate_axes(sketch,core)
     for item, x_value, y_value in zip(points, x_values, y_values):
         for axis, expression in enumerate((x_value, y_value)):
             coordinate=item.geometry.x if axis==0 else item.geometry.y
@@ -321,8 +320,8 @@ def _anchored_rectangle_sketch(comp, core, fusion, x, y, width, height, name,
                 else:
                     sketch.geometricConstraints.addHorizontalPoints(sketch.originPoint,item)
             else:
-                dim=sketch.sketchDimensions.addDistanceDimension(sketch.originPoint,item,orientations[axis],
-                    point(item.geometry.x+.3,item.geometry.y+.3,0))
+                dim=sketch.sketchDimensions.addOffsetDimension(axes[axis],item,
+                    point(item.geometry.x+.3,item.geometry.y+.3,0),True)
                 dim.parameter.expression='abs('+expression+')'
     if not sketch.isFullyConstrained:
         raise RuntimeError("Sketch chưa đủ ràng buộc: " + name)
@@ -340,13 +339,12 @@ def _anchored_circle_sketch(comp, core, fusion, x, y, diameter, name, plane,
     diameter_expression = diameter_expression or "{} mm".format(diameter)
     circle = sketch.sketchCurves.sketchCircles.addByCenterRadius(
         point(x / 10, y / 10, 0), diameter / 20)
-    orientations = (fusion.DimensionOrientations.HorizontalDimensionOrientation,
-                    fusion.DimensionOrientations.VerticalDimensionOrientation)
+    axes = _coordinate_axes(sketch,core)
     for axis, expression in enumerate((x_expression, y_expression)):
-        dim = sketch.sketchDimensions.addDistanceDimension(
-            sketch.originPoint, circle.centerSketchPoint, orientations[axis],
-            point(x / 10 + 0.3, y / 10 + 0.3, 0))
-        dim.parameter.expression = expression
+        dim = sketch.sketchDimensions.addOffsetDimension(
+            axes[axis], circle.centerSketchPoint,
+            point(x / 10 + 0.3, y / 10 + 0.3, 0),True)
+        dim.parameter.expression = 'abs(' + expression + ')'
     diameter_dim = sketch.sketchDimensions.addDiameterDimension(
         circle, point(x / 10 + 0.3, y / 10 + 0.3, 0))
     diameter_dim.parameter.expression = diameter_expression
@@ -381,10 +379,22 @@ def _rectangle_sketch(comp, core, x, y, width, height, name, plane=None,
         x_expression, y_expression, width_expression, height_expression)
 
 
-def _add_constrained_loop(sketch, core, fusion, expressions, design):
+def _coordinate_axes(sketch, core):
+    """Fixed construction datums; Y datum measures X and X datum measures Y."""
+    axes=[]
+    for start,end in (((0,-1,0),(0,1,0)),((-1,0,0),(1,0,0))):
+        line=sketch.sketchCurves.sketchLines.addByTwoPoints(
+            core.Point3D.create(*start),core.Point3D.create(*end))
+        line.isConstruction=True
+        line.isFixed=True
+        axes.append(line)
+    return axes
+
+
+def _add_constrained_loop(sketch, core, fusion, expressions, design, axes=None):
     points=[]
-    orientations=(fusion.DimensionOrientations.HorizontalDimensionOrientation,
-                  fusion.DimensionOrientations.VerticalDimensionOrientation)
+    if axes is None:
+        axes=_coordinate_axes(sketch,core)
     for pair in expressions:
         coords=[design.unitsManager.evaluateExpression(expr,'mm') for expr in pair]
         point=sketch.sketchPoints.add(core.Point3D.create(*coords,0))
@@ -395,8 +405,8 @@ def _add_constrained_loop(sketch, core, fusion, expressions, design):
                 else:
                     sketch.geometricConstraints.addHorizontalPoints(sketch.originPoint,point)
             else:
-                dim=sketch.sketchDimensions.addDistanceDimension(sketch.originPoint,point,
-                    orientations[axis],core.Point3D.create(coords[0]+.05,coords[1]+.05,0))
+                dim=sketch.sketchDimensions.addOffsetDimension(axes[axis],point,
+                    core.Point3D.create(coords[0]+.05,coords[1]+.05,0),True)
                 dim.parameter.expression='abs('+expr+')'
         points.append(point)
     for i,point in enumerate(points):
@@ -437,6 +447,7 @@ def _add_text(sketch, core, text, height_mm, x_mm, y_mm, width_mm,
         sketch.geometricConstraints.addHorizontal(bottom)
     orientations=(fusion.DimensionOrientations.HorizontalDimensionOrientation,
                   fusion.DimensionOrientations.VerticalDimensionOrientation)
+    axes=_coordinate_axes(sketch,core)
     def drive(a,b,axis,expr):
         dim=sketch.sketchDimensions.addDistanceDimension(a,b,orientations[axis],
             core.Point3D.create(b.geometry.x+.03,b.geometry.y+.03,0))
@@ -449,7 +460,9 @@ def _add_text(sketch, core, text, height_mm, x_mm, y_mm, width_mm,
             if axis==0: sketch.geometricConstraints.addVerticalPoints(sketch.originPoint,bl)
             else: sketch.geometricConstraints.addHorizontalPoints(sketch.originPoint,bl)
         else:
-            drive(sketch.originPoint,bl,axis,expr)
+            dim=sketch.sketchDimensions.addOffsetDimension(axes[axis],bl,
+                core.Point3D.create(bl.geometry.x+.03,bl.geometry.y+.03,0),True)
+            dim.parameter.expression='abs('+expr+')'
     if not sketch.isFullyConstrained:
         raise RuntimeError('Text sketch chưa đủ ràng buộc: '+text)
     return result
@@ -643,8 +656,9 @@ def _build_trim(design, fusion, core, p, layout_result, board):
     plane=_offset_plane(comp,core,'base_thickness','Raised trim plane')
     sketch=comp.sketches.add(plane)
     sketch.name='Wave ring profile'
-    _add_constrained_loop(sketch,core,fusion,wave_outline_expressions(p,'border_edge_gap'),design)
-    _add_constrained_loop(sketch,core,fusion,wave_outline_expressions(p,'border_edge_gap+border_width'),design)
+    axes=_coordinate_axes(sketch,core)
+    _add_constrained_loop(sketch,core,fusion,wave_outline_expressions(p,'border_edge_gap'),design,axes)
+    _add_constrained_loop(sketch,core,fusion,wave_outline_expressions(p,'border_edge_gap+border_width'),design,axes)
     if not sketch.isFullyConstrained:
         raise RuntimeError('Wave ring sketch is not fully constrained.')
     rings=[profile for profile in sketch.profiles if profile.profileLoops.count==2]

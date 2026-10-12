@@ -232,5 +232,36 @@ class FusionExpressionGrammarRegressionTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError,'core_width.*max\\('):
             timetable._add_user_parameters(design,core)
 
+
+class CoordinateOffsetRegressionTest(unittest.TestCase):
+    def test_loop_coordinates_use_orthogonal_driving_offsets_and_shared_datums(self):
+        from types import SimpleNamespace as NS
+        lines, offsets = [], []
+        def line(a,b):
+            result=NS(a=a,b=b,isConstruction=False,isFixed=False)
+            lines.append(result)
+            return result
+        def offset(axis,point,text,isDriving=True):
+            self.assertTrue(axis.isConstruction and axis.isFixed and isDriving)
+            dim=NS(parameter=NS(expression=''))
+            offsets.append((axis,point,dim))
+            return dim
+        sketch=NS(sketchCurves=NS(sketchLines=NS(addByTwoPoints=line)),
+            sketchPoints=NS(add=lambda p:NS(geometry=NS(x=p[0],y=p[1]))),
+            sketchDimensions=NS(addOffsetDimension=offset))
+        core=NS(Point3D=NS(create=lambda *a:a))
+        design=NS(unitsManager=NS(evaluateExpression=lambda e,u:float(e.replace(' mm',''))/10))
+        axes=timetable._coordinate_axes(sketch,core)
+        pairs=[('0.2 mm','0.2 mm'),('180 mm','0.2 mm'),('180 mm','162 mm')]
+        timetable._add_constrained_loop(sketch,core,NS(),pairs,design,axes)
+        timetable._add_constrained_loop(sketch,core,NS(),pairs,design,axes)
+        self.assertEqual(sum(line.isConstruction for line in lines),2)
+        self.assertEqual(len(offsets),12)
+        for index,(axis,point,dim) in enumerate(offsets):
+            self.assertIs(axis,axes[index%2])
+            self.assertEqual(dim.parameter.expression,'abs('+pairs[(index//2)%3][index%2]+')')
+        self.assertNotEqual(axes[0].a[1],axes[0].b[1])
+        self.assertNotEqual(axes[1].a[0],axes[1].b[0])
+
 if __name__ == '__main__':
     unittest.main()

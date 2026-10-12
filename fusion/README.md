@@ -95,3 +95,9 @@ Khi Run, hộp tiến trình báo nhóm đang dựng; lỗi extrude có tên fea
 ### Bản sửa sau phản hồi Fusion
 
 Fusion đã báo `Invalid expression` ở bước tạo derived parameters. Đã sửa `core_width` thành các hàm `max` lồng nhau (mỗi hàm hai đối số), đổi cờ trong `if` thành phép so sánh `== 1`, và bổ sung tên/expression/unit vào lỗi parameter. Bộ offline hiện có **16 test đạt**, gồm regression grammar và thông báo lỗi. Đây là sửa source đã kiểm thử offline; cần Run lại trong Fusion để xác nhận bước tạo parameters và các bước dựng phía sau.
+
+### Bản sửa tọa độ sau lần Run tiếp theo
+
+Log thực tế xác nhận đã qua bước parameters và lỗi `VCS_SKETCH_OVER_CONSTRAINTS` khi dựng outline. Đã đổi các dimension tọa độ từ khoảng cách điểm–gốc sang `addOffsetDimension` vuông góc với hai trục dựng cố định. Chỉ trục tham chiếu là fixed/construction; các điểm hình học vẫn do driving expressions điều khiển. Áp dụng cho outline, rectangle, tâm lỗ và vị trí text; chiều rộng/cao text vẫn dùng dimension riêng. Hai vòng viền dùng chung cặp trục. **17 test offline + compile đạt**, chưa xác nhận bản sửa này bằng Fusion runtime.
+
+API: https://help.autodesk.com/cloudhelp/ENU/Fusion-360-API/files/fusion_SketchDimensions_addOffsetDimension.htm
