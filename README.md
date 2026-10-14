@@ -54,4 +54,4 @@ Bộ [script Fusion native parametric](fusion/README.md) tạo document mới g�
 
 ## Bộ tài liệu agent tự học.
 
-[Cẩm nang dùng chung](https://github.com/TimTini/snaplock-storage-box/blob/main/docs/agent-learning.md) tổng hợp quy trình SCAD trước rồi Fusion Python sau. [Sổ lỗi và cách sửa](https://github.com/TimTini/snaplock-storage-box/blob/main/docs/error-cookbook.md) ghi các ca kỹ thuật cùng phạm vi kiểm chứng. [Mẫu giao việc](https://github.com/TimTini/snaplock-storage-box/blob/main/docs/scad-to-fusion-task.md) áp dụng quy trình cho model mới.
+[Bộ hướng dẫn chung STL, OpenSCAD và Fusion](https://github.com/TimTini/snaplock-storage-box/blob/main/docs/guides/README.md) có [điểm vào cho agent](https://github.com/TimTini/snaplock-storage-box/blob/main/docs/guides/START-HERE.md), quy trình theo đầu vào, thiết lập chuyển máy, template và registry nguồn. Các hồ sơ của project này là ví dụ có phạm vi riêng.
