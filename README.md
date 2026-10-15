@@ -2,6 +2,8 @@
 
 Dự án chứa một mẫu thời khóa biểu tham số, các khối tháo rời và một số thiết kế OpenSCAD liên quan.
 
+Bản chính của hướng dẫn chung nằm tại `H:/OpenSCAD/docs/guides`, dùng cho mọi dự án STL, OpenSCAD và Fusion. [Bản lưu công khai 1.0.2](https://github.com/TimTini/snaplock-storage-box/tree/e9311687b4653a4055597ba93b595d739734020c/docs/guides) giữ nội dung theo commit trước khi chuyển thư mục.
+
 ## Mẫu chính
 
 Mở `thoi-khoa-bieu.scad` bằng OpenSCAD. Các thông số thường chỉnh nằm ở đầu file: số ngày, số tiết Sáng/Chiều, nội dung chữ, màu và phần cần xuất trong `output_part`.
@@ -54,4 +56,4 @@ Bộ [script Fusion native parametric](fusion/README.md) tạo document mới g�
 
 ## Bộ tài liệu agent tự học.
 
-[Bộ hướng dẫn chung STL, OpenSCAD và Fusion](https://github.com/TimTini/snaplock-storage-box/blob/main/docs/guides/README.md) có [điểm vào cho agent](https://github.com/TimTini/snaplock-storage-box/blob/main/docs/guides/START-HERE.md), quy trình theo đầu vào, thiết lập chuyển máy, template và registry nguồn. Các hồ sơ của project này là ví dụ có phạm vi riêng.
+[Bộ hướng dẫn chung STL, OpenSCAD và Fusion](https://github.com/TimTini/snaplock-storage-box/blob/e9311687b4653a4055597ba93b595d739734020c/docs/guides/README.md) có [điểm vào cho agent](https://github.com/TimTini/snaplock-storage-box/blob/e9311687b4653a4055597ba93b595d739734020c/docs/guides/START-HERE.md), quy trình theo đầu vào, thiết lập chuyển máy, template và registry nguồn. Các hồ sơ của project này là ví dụ có phạm vi riêng.
