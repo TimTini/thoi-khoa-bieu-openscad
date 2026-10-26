@@ -1,5 +1,7 @@
 # Thời khóa biểu OpenSCAD
 
+Cấu trúc thư mục và vai trò dữ liệu: [docs/STRUCTURE.md](docs/STRUCTURE.md).
+
 Dự án chứa một mẫu thời khóa biểu tham số, các khối tháo rời và một số thiết kế OpenSCAD liên quan.
 
 Bản chính của hướng dẫn chung nằm tại `H:/OpenSCAD/docs/guides`, dùng cho mọi dự án STL, OpenSCAD và Fusion. [Bản lưu công khai 1.0.2](https://github.com/TimTini/snaplock-storage-box/tree/e9311687b4653a4055597ba93b595d739734020c/docs/guides) giữ nội dung theo commit trước khi chuyển thư mục.
